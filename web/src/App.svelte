@@ -304,7 +304,11 @@
       </span>
     {/if}
   </span>
-  <span class="dim keys"><kbd>←</kbd><kbd>→</kbd> step token</span>
+  <span class="keys" role="group" aria-label="Step token">
+    <button class="step" onclick={() => select(sel - 1)} disabled={!a || sel <= 0} aria-label="Previous token" title="Previous token (←)">←</button>
+    <button class="step" onclick={() => select(sel + 1)} disabled={!a || sel >= a.T - 1} aria-label="Next token" title="Next token (→)">→</button>
+    <span class="dim">step token</span>
+  </span>
 </div>
 
 {#if readyRun && !dialogOpen}
@@ -433,17 +437,20 @@
   }
   .seg button:first-child { border-radius: 4px 0 0 4px; }
   .seg button:last-child { border-radius: 0 4px 4px 0; margin-left: -1px; }
+  .step {
+    min-width: 28px;
+    padding: 2px 8px;
+    font-family: ui-monospace, monospace;
+  }
+  .step:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
   .keys {
     margin-left: auto;
-  }
-  kbd {
-    font-family: var(--sans);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    padding: 0 4px;
-    margin-right: 2px;
-    color: var(--dim);
-    font-size: 11px;
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
   }
   main {
     display: grid;
