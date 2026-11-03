@@ -229,7 +229,7 @@
 <svelte:window onkeydown={onKey} />
 
 <header>
-  <h1>traverse</h1>
+  <h1>lanternfish</h1>
   <label class="picker">
     <span class="sr-only">Trace</span>
     <select

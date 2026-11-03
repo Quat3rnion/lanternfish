@@ -1,4 +1,4 @@
-// Types for the traverse HTTP API. Keep in sync with the Rust server.
+// Types for the lanternfish HTTP API. Keep in sync with the Rust server.
 
 export type Phase = 'prefill' | 'decode';
 export type LayerKind = 'attention' | 'linear' | 'unknown';

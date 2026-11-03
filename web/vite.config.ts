@@ -2,9 +2,9 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { mockApi } from './mock/api.ts';
 
-// TRAVERSE_API=http://host:port npm run dev  -> proxy /api to a running backend
-// (no TRAVERSE_API)                          -> serve the mock API from fixtures/
-const backend = process.env.TRAVERSE_API;
+// LANTERNFISH_API=http://host:port npm run dev  -> proxy /api to a running backend
+// (no LANTERNFISH_API)                          -> serve the mock API from fixtures/
+const backend = process.env.LANTERNFISH_API;
 
 export default defineConfig({
   base: './',

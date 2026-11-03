@@ -31,6 +31,17 @@ fn err(code: StatusCode, msg: impl ToString) -> Response {
     (code, Json(json!({"error": msg.to_string()}))).into_response()
 }
 
+async fn health(State(a): State<App>) -> Response {
+    let runs = a.queue.runs.lock().unwrap();
+    Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "traces": a.store.list().len(),
+        "runs_active": runs.iter().filter(|r| r.state == "running" || r.state == "queued").count(),
+        "model_dirs": *a.model_dirs,
+    })).into_response()
+}
+
 async fn traces(State(a): State<App>) -> Response {
     Json(a.store.list()).into_response()
 }
@@ -88,6 +99,7 @@ async fn static_file(uri: axum::http::Uri) -> Response {
 
 pub fn router(app: App) -> Router {
     Router::new()
+        .route("/api/health", get(health))
         .route("/api/traces", get(traces))
         .route("/api/traces/{name}", get(trace))
         .route("/api/models", get(models))

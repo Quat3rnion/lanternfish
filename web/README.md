@@ -1,6 +1,6 @@
-# traverse web UI
+# lanternfish web UI
 
-This directory contains the browser UI for traverse. The UI shows how a model
+This directory contains the browser UI for lanternfish. The UI shows how a model
 routes each token through its layers and experts during prefill and decode.
 
 The stack is Vite, Svelte 5 (runes) and TypeScript. The UI uses no UI
@@ -15,11 +15,11 @@ npm run check      # svelte-check, must report 0 errors and 0 warnings
 npm run build      # writes dist/
 ```
 
-To use a running traverse server instead of the mock API, set
-`TRAVERSE_API`. Vite then sends all `/api` requests to that server:
+To use a running lanternfish server instead of the mock API, set
+`LANTERNFISH_API`. Vite then sends all `/api` requests to that server:
 
 ```sh
-TRAVERSE_API=http://127.0.0.1:8791 npm run dev
+LANTERNFISH_API=http://127.0.0.1:8791 npm run dev
 ```
 
 Do not use port 3000 or port 4095.

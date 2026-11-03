@@ -1,4 +1,4 @@
-// Development-only mock of the traverse HTTP API. It serves the files in
+// Development-only mock of the lanternfish HTTP API. It serves the files in
 // fixtures/ and simulates trace runs, so the UI works without the Rust backend.
 // It is not part of the production bundle.
 import { readFileSync, readdirSync } from 'node:fs';
@@ -155,7 +155,7 @@ export function mockApi(): Plugin {
   }
 
   return {
-    name: 'traverse-mock-api',
+    name: 'lanternfish-mock-api',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const url = new URL(req.url ?? '/', 'http://x');

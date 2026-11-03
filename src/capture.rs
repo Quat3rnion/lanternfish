@@ -245,8 +245,24 @@ impl Drop for Llama {
     }
 }
 
+/// Load ggml backends. Builds with GGML_BACKEND_DL keep the CPU backend in a
+/// plugin; LANTERNFISH_BACKEND_DIR points at it (set in the Docker image).
+fn init_backends() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        match std::env::var("LANTERNFISH_BACKEND_DIR") {
+            Ok(d) => {
+                let c = CString::new(d).unwrap();
+                ffi::ggml_backend_load_all_from_path(c.as_ptr());
+            }
+            Err(_) => ffi::ggml_backend_load_all(),
+        }
+        ffi::llama_backend_init();
+    });
+}
+
 fn load(path: &Path) -> Result<*mut ffi::llama_model> {
-    unsafe { ffi::llama_backend_init() };
+    init_backends();
     let mut mp = unsafe { ffi::llama_model_default_params() };
     mp.n_gpu_layers = 0;
     let c = CString::new(path.to_string_lossy().as_bytes())?;

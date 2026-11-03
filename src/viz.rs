@@ -215,7 +215,7 @@ pub fn build(cap: &Capture, m: &ModelFile, lens: &Lens, name: &str, labels: usiz
         "captured": cap.captured,
         "created": crate::util::now_iso(),
         "prompt": cap.prompt,
-        "tool": format!("traverse {}", env!("CARGO_PKG_VERSION")),
+        "tool": format!("lanternfish {}", env!("CARGO_PKG_VERSION")),
     });
     Ok((viz, BuildStats { tokens: t_count, lens_agreement: agreement, experts_labelled: experts.len() }))
 }

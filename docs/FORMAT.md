@@ -1,6 +1,6 @@
 # Trace format (`viz.json`)
 
-One JSON object per trace, in `$TRAVERSE_HOME/traces/<name>/viz.json`.
+One JSON object per trace, in `$LANTERNFISH_HOME/traces/<name>/viz.json`.
 `meta.json` beside it is a short summary for listings. `prompt.txt` holds
 the exact text that was tokenized.
 
@@ -21,7 +21,7 @@ the exact text that was tokenized.
 | `captured` | array | graph node bases that were found |
 | `created` | string | UTC ISO time |
 | `prompt` | string | the tokenized text |
-| `tool` | string | `traverse <version>` |
+| `tool` | string | `lanternfish <version>` |
 
 ## Cell
 

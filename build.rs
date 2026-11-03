@@ -40,7 +40,7 @@ fn main() {
     if !dist.join("index.html").exists() {
         std::fs::create_dir_all(&dist).unwrap();
         std::fs::write(dist.join("index.html"),
-            "<!doctype html><p>UI not built. Run <code>npm --prefix web ci && npm --prefix web run build</code>, then rebuild traverse.</p>").unwrap();
+            "<!doctype html><p>UI not built. Run <code>npm --prefix web ci && npm --prefix web run build</code>, then rebuild lanternfish.</p>").unwrap();
     }
     println!("cargo:rerun-if-changed=web/dist");
 }

@@ -1,4 +1,4 @@
-//! traverse: trace and visualize how a llama.cpp model routes each token
+//! lanternfish: trace and visualize how a llama.cpp model routes each token
 //! through its layers and experts, in prefill and in decoding.
 mod capture;
 mod ffi;
@@ -22,10 +22,10 @@ use crate::model::{ModelFile, ROLES};
 use crate::store::Store;
 
 #[derive(Parser)]
-#[command(name = "traverse", version, about)]
+#[command(name = "lanternfish", version, about)]
 struct Cli {
     /// Where traces and caches are kept.
-    #[arg(long, env = "TRAVERSE_HOME", global = true)]
+    #[arg(long, env = "LANTERNFISH_HOME", global = true)]
     home: Option<PathBuf>,
     /// Show llama.cpp log output.
     #[arg(long, short, global = true)]
@@ -61,7 +61,7 @@ enum Cmd {
         /// Leave thinking on for thinking models.
         #[arg(long)]
         think: bool,
-        #[arg(long, default_value_t = default_threads())]
+        #[arg(long, env = "LANTERNFISH_THREADS", default_value_t = default_threads())]
         threads: i32,
         /// Experts to label (most routing mass first).
         #[arg(long, default_value_t = 600)]
@@ -76,9 +76,9 @@ enum Cmd {
         #[arg(long, default_value_t = 8791)]
         port: u16,
         /// Directories scanned for GGUF files that may be traced from the UI.
-        #[arg(long = "models-dir", env = "TRAVERSE_MODELS", value_delimiter = ':')]
+        #[arg(long = "models-dir", env = "LANTERNFISH_MODELS", value_delimiter = ':')]
         models_dir: Vec<PathBuf>,
-        #[arg(long, default_value_t = default_threads())]
+        #[arg(long, env = "LANTERNFISH_THREADS", default_value_t = default_threads())]
         threads: i32,
         #[arg(long, default_value_t = 600)]
         labels: usize,
@@ -93,7 +93,7 @@ fn home(cli: &Cli) -> PathBuf {
     cli.home.clone().unwrap_or_else(|| {
         let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
-        base.join("traverse")
+        base.join("lanternfish")
     })
 }
 
@@ -157,7 +157,7 @@ fn main() -> Result<()> {
             rt.block_on(async move {
                 let addr = format!("{host}:{port}");
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
-                eprintln!("traverse UI on http://{addr}/");
+                eprintln!("lanternfish UI on http://{addr}/");
                 axum::serve(listener, server::router(app)).with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;
                 }).await?;

@@ -1,0 +1,17 @@
+# docker compose up -d   then open http://HOST:8791/
+services:
+  lanternfish:
+    build: .
+    image: lanternfish:latest
+    ports:
+      - "8791:8791"
+    volumes:
+      - ${LANTERNFISH_MODELS_DIR:-./models}:/models:ro
+      - lanternfish-data:/data
+    environment:
+      # Optional: CPU threads per trace (default: half the cores).
+      # LANTERNFISH_THREADS: "16"
+      RUST_BACKTRACE: "1"
+    restart: unless-stopped
+volumes:
+  lanternfish-data:
