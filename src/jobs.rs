@@ -34,14 +34,41 @@ pub struct TraceParams {
 }
 
 /// Run a full trace and save it. `progress(phase, fraction)` is called often.
-pub fn trace(store: &Store, req: &RunRequest, p: &TraceParams, progress: &(dyn Fn(&str, f32) + Sync)) -> Result<BuildStats> {
+pub fn trace(
+    store: &Store,
+    req: &RunRequest,
+    p: &TraceParams,
+    progress: &(dyn Fn(&str, f32) + Sync),
+) -> Result<BuildStats> {
     store.dir(&req.name)?; // validate before the expensive part
     let m = ModelFile::open(&req.model)?;
-    let opt = Options { n_predict: req.n, threads: p.threads, raw: req.raw, think: req.think, ubatch: 512 };
-    let cap = capture::run(&req.model, m.s.hidden, m.s.n_layers, m.s.top_k, &req.prompt, &opt, progress)?;
+    let opt = Options {
+        n_predict: req.n,
+        threads: p.threads,
+        raw: req.raw,
+        think: req.think,
+        ubatch: 512,
+    };
+    let cap = capture::run(
+        &req.model,
+        m.s.hidden,
+        m.s.n_layers,
+        m.s.top_k,
+        &req.prompt,
+        &opt,
+        progress,
+    )?;
     progress("loading LM head", 0.0);
     let lens = Lens::load(&m)?;
-    let (viz, stats) = viz::build(&cap, &m, &lens, &req.name, p.labels, &store.label_cache(&req.model), progress)?;
+    let (viz, stats) = viz::build(
+        &cap,
+        &m,
+        &lens,
+        &req.name,
+        p.labels,
+        &store.label_cache(&req.model),
+        progress,
+    )?;
     progress("saving", 1.0);
     store.save(&req.name, &viz)?;
     Ok(stats)
@@ -89,15 +116,25 @@ impl Queue {
                         }
                     }
                     let tail = l.join("\n");
-                    update(&|r| { r.phase = phase.to_string(); r.progress = frac; r.log_tail = tail.clone(); });
+                    update(&|r| {
+                        r.phase = phase.to_string();
+                        r.progress = frac;
+                        r.log_tail = tail.clone();
+                    });
                 };
                 match trace(&store, &req, &params, &progress) {
                     Ok(s) => update(&|r| {
                         r.state = "done";
                         r.progress = 1.0;
-                        r.phase = format!("{} tokens, lens agreement {:.3}, {} expert labels", s.tokens, s.lens_agreement, s.experts_labelled);
+                        r.phase = format!(
+                            "{} tokens, lens agreement {:.3}, {} expert labels",
+                            s.tokens, s.lens_agreement, s.experts_labelled
+                        );
                     }),
-                    Err(e) => update(&|r| { r.state = "failed"; r.error = Some(format!("{e:#}")); }),
+                    Err(e) => update(&|r| {
+                        r.state = "failed";
+                        r.error = Some(format!("{e:#}"));
+                    }),
                 }
             }
         });
@@ -105,11 +142,24 @@ impl Queue {
     }
 
     pub fn submit(&self, req: RunRequest) -> String {
-        let id = format!("{}-{}", crate::util::now_iso().replace([':', '-'], ""), req.name);
-        self.runs.lock().unwrap().insert(0, Run {
-            id: id.clone(), name: req.name.clone(), model: req.model.clone(), state: "queued",
-            phase: "waiting".into(), progress: 0.0, log_tail: String::new(), error: None,
-        });
+        let id = format!(
+            "{}-{}",
+            crate::util::now_iso().replace([':', '-'], ""),
+            req.name
+        );
+        self.runs.lock().unwrap().insert(
+            0,
+            Run {
+                id: id.clone(),
+                name: req.name.clone(),
+                model: req.model.clone(),
+                state: "queued",
+                phase: "waiting".into(),
+                progress: 0.0,
+                log_tail: String::new(),
+                error: None,
+            },
+        );
         let _ = self.tx.send((id.clone(), req));
         id
     }

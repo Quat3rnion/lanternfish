@@ -23,7 +23,12 @@ pub struct Lens {
 impl Lens {
     pub fn load(m: &ModelFile) -> Result<Self> {
         let (head, vocab) = m.head()?;
-        Ok(Self { head, vocab, hidden: m.s.hidden, norm: m.final_norm()? })
+        Ok(Self {
+            head,
+            vocab,
+            hidden: m.s.hidden,
+            norm: m.final_norm()?,
+        })
     }
 
     /// logits = head @ (rmsnorm(h) * final_norm), for rows of h. Returns [rows, vocab].
@@ -46,22 +51,44 @@ impl Lens {
             let c0 = b * BLOCK;
             let w = BLOCK.min(v - c0);
             unsafe {
-                matrixmultiply::sgemm(n, h, w, 1.0, x_ptr as *const f32, h as isize, 1,
-                    self.head.as_ptr().add(c0 * h), 1, h as isize, 0.0,
-                    (out_ptr as *mut f32).add(c0), v as isize, 1);
+                matrixmultiply::sgemm(
+                    n,
+                    h,
+                    w,
+                    1.0,
+                    x_ptr as *const f32,
+                    h as isize,
+                    1,
+                    self.head.as_ptr().add(c0 * h),
+                    1,
+                    h as isize,
+                    0.0,
+                    (out_ptr as *mut f32).add(c0),
+                    v as isize,
+                    1,
+                );
             }
         });
         out
     }
 
     pub fn project(&self, dir: &[f32]) -> Vec<f32> {
-        self.head.par_chunks(self.hidden).map(|row| row.iter().zip(dir).map(|(a, b)| a * b).sum()).collect()
+        self.head
+            .par_chunks(self.hidden)
+            .map(|row| row.iter().zip(dir).map(|(a, b)| a * b).sum())
+            .collect()
     }
 }
 
 fn top_by(v: &[f32], k: usize, desc: bool) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..v.len()).collect();
-    let cmp = |a: &usize, b: &usize| if desc { v[*b].total_cmp(&v[*a]) } else { v[*a].total_cmp(&v[*b]) };
+    let cmp = |a: &usize, b: &usize| {
+        if desc {
+            v[*b].total_cmp(&v[*a])
+        } else {
+            v[*a].total_cmp(&v[*b])
+        }
+    };
     idx.select_nth_unstable_by(k, cmp);
     idx.truncate(k);
     idx.sort_by(cmp);
@@ -74,7 +101,9 @@ fn r4(x: f32) -> Value {
 
 /// Dominant output direction of an expert's down projection: power iteration on W W^T.
 fn expert_direction(w: &[f32], hidden: usize, inter: usize) -> (Vec<f32>, f32) {
-    let mut v: Vec<f32> = (0..hidden).map(|i| w[i * inter..(i + 1) * inter].iter().sum()).collect();
+    let mut v: Vec<f32> = (0..hidden)
+        .map(|i| w[i * inter..(i + 1) * inter].iter().sum())
+        .collect();
     let mut t = vec![0f32; inter];
     for _ in 0..6 {
         t.iter_mut().for_each(|x| *x = 0.0);
@@ -85,12 +114,22 @@ fn expert_direction(w: &[f32], hidden: usize, inter: usize) -> (Vec<f32>, f32) {
             }
         }
         for i in 0..hidden {
-            v[i] = w[i * inter..(i + 1) * inter].iter().zip(&t).map(|(a, b)| a * b).sum();
+            v[i] = w[i * inter..(i + 1) * inter]
+                .iter()
+                .zip(&t)
+                .map(|(a, b)| a * b)
+                .sum();
         }
         let n = v.iter().map(|a| a * a).sum::<f32>().sqrt() + 1e-12;
         v.iter_mut().for_each(|a| *a /= n);
     }
-    let wt_v: f32 = (0..inter).map(|j| { let s: f32 = (0..hidden).map(|i| w[i * inter + j] * v[i]).sum(); s * s }).sum::<f32>().sqrt();
+    let wt_v: f32 = (0..inter)
+        .map(|j| {
+            let s: f32 = (0..hidden).map(|i| w[i * inter + j] * v[i]).sum();
+            s * s
+        })
+        .sum::<f32>()
+        .sqrt();
     let wn = w.iter().map(|a| a * a).sum::<f32>().sqrt() + 1e-9;
     (v, wt_v / wn)
 }
@@ -101,21 +140,37 @@ pub struct BuildStats {
     pub experts_labelled: usize,
 }
 
-pub fn build(cap: &Capture, m: &ModelFile, lens: &Lens, name: &str, labels: usize, label_cache: &Path,
-             progress: &(dyn Fn(&str, f32) + Sync)) -> Result<(Value, BuildStats)> {
+pub fn build(
+    cap: &Capture,
+    m: &ModelFile,
+    lens: &Lens,
+    name: &str,
+    labels: usize,
+    label_cache: &Path,
+    progress: &(dyn Fn(&str, f32) + Sync),
+) -> Result<(Value, BuildStats)> {
     let s = &m.s;
     let t_count = cap.tokens.len();
-    let next: Vec<Option<i32>> = (0..t_count).map(|i| cap.tokens.get(i + 1).map(|t| t.id)).collect();
+    let next: Vec<Option<i32>> = (0..t_count)
+        .map(|i| cap.tokens.get(i + 1).map(|t| t.id))
+        .collect();
     let mut agree = (0usize, 0usize);
     let mut mass: HashMap<(usize, i32), f32> = HashMap::new();
     let mut layers = Vec::with_capacity(s.n_layers);
     for (l, toks) in cap.layers.iter().enumerate() {
         progress("logit lens", l as f32 / s.n_layers as f32);
-        let mut idx: Vec<usize> = toks.iter().filter(|(_, st)| st.resid.is_some()).map(|(i, _)| *i).collect();
+        let mut idx: Vec<usize> = toks
+            .iter()
+            .filter(|(_, st)| st.resid.is_some())
+            .map(|(i, _)| *i)
+            .collect();
         idx.sort();
         let mut per = BTreeMap::new();
         for chunk in idx.chunks(LENS_CHUNK) {
-            let rows: Vec<&[f32]> = chunk.iter().map(|i| toks[i].resid.as_deref().unwrap()).collect();
+            let rows: Vec<&[f32]> = chunk
+                .iter()
+                .map(|i| toks[i].resid.as_deref().unwrap())
+                .collect();
             let lg = lens.logits(&rows);
             let recs: Vec<(usize, Value, Option<bool>)> = chunk.par_iter().enumerate().map(|(j, &i)| {
                 let row = &lg[j * lens.vocab..(j + 1) * lens.vocab];
@@ -153,43 +208,57 @@ pub fn build(cap: &Capture, m: &ModelFile, lens: &Lens, name: &str, labels: usiz
                 (i, rec, hit)
             }).collect();
             for (i, rec, hit) in recs {
-                if l + 1 == s.n_layers && let Some(h) = hit {
+                if l + 1 == s.n_layers
+                    && let Some(h) = hit
+                {
                     agree.0 += h as usize;
                     agree.1 += 1;
                 }
                 per.insert(i.to_string(), rec);
             }
         }
-        for (_, st) in toks.iter() {
+        for st in toks.values() {
             if let (Some(ex), Some((_, w))) = (&st.experts, &st.weights) {
                 for (e, x) in ex.iter().zip(w) {
                     *mass.entry((l, *e)).or_default() += x;
                 }
             }
         }
-        layers.push(json!({"layer": l, "kind": layer_kind(&cap.layer_attn_base[l]), "tokens": per}));
+        layers
+            .push(json!({"layer": l, "kind": layer_kind(&cap.layer_attn_base[l]), "tokens": per}));
     }
 
     // expert labels for the experts that carry the most routing mass
-    let mut cache: BTreeMap<String, Value> = std::fs::read(label_cache).ok()
-        .and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut cache: BTreeMap<String, Value> = std::fs::read(label_cache)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     let mut heavy: Vec<((usize, i32), f32)> = mass.into_iter().collect();
     heavy.sort_by(|a, b| b.1.total_cmp(&a.1));
     heavy.truncate(labels);
     let mut experts = BTreeMap::new();
     if s.n_experts > 0 {
-        let todo: Vec<(usize, i32)> = heavy.iter().map(|x| x.0).filter(|(l, e)| !cache.contains_key(&format!("{l}.{e}"))).collect();
+        let todo: Vec<(usize, i32)> = heavy
+            .iter()
+            .map(|x| x.0)
+            .filter(|(l, e)| !cache.contains_key(&format!("{l}.{e}")))
+            .collect();
         for (k, (l, e)) in todo.iter().enumerate() {
             progress("expert labels", k as f32 / todo.len().max(1) as f32);
-            let Ok((w, inter)) = m.expert_down(*l, *e as usize) else { continue };
+            let Ok((w, inter)) = m.expert_down(*l, *e as usize) else {
+                continue;
+            };
             let (dir, share) = expert_direction(&w, s.hidden, inter);
             let lg = lens.project(&dir);
             let word = |i: &usize| cap.vocab.get(*i).cloned().unwrap_or_default();
-            cache.insert(format!("{l}.{e}"), json!({
-                "pos": top_by(&lg, 6, true).iter().map(word).collect::<Vec<_>>(),
-                "neg": top_by(&lg, 6, false).iter().map(word).collect::<Vec<_>>(),
-                "rank1": r4(share),
-            }));
+            cache.insert(
+                format!("{l}.{e}"),
+                json!({
+                    "pos": top_by(&lg, 6, true).iter().map(word).collect::<Vec<_>>(),
+                    "neg": top_by(&lg, 6, false).iter().map(word).collect::<Vec<_>>(),
+                    "rank1": r4(share),
+                }),
+            );
         }
         for ((l, e), _) in &heavy {
             let key = format!("{l}.{e}");
@@ -200,7 +269,11 @@ pub fn build(cap: &Capture, m: &ModelFile, lens: &Lens, name: &str, labels: usiz
         std::fs::write(label_cache, serde_json::to_vec(&cache)?)?;
     }
 
-    let agreement = if agree.1 > 0 { agree.0 as f32 / agree.1 as f32 } else { 0.0 };
+    let agreement = if agree.1 > 0 {
+        agree.0 as f32 / agree.1 as f32
+    } else {
+        0.0
+    };
     let viz = json!({
         "name": name,
         "model": s,
@@ -217,5 +290,12 @@ pub fn build(cap: &Capture, m: &ModelFile, lens: &Lens, name: &str, labels: usiz
         "prompt": cap.prompt,
         "tool": format!("lanternfish {}", env!("CARGO_PKG_VERSION")),
     });
-    Ok((viz, BuildStats { tokens: t_count, lens_agreement: agreement, experts_labelled: experts.len() }))
+    Ok((
+        viz,
+        BuildStats {
+            tokens: t_count,
+            lens_agreement: agreement,
+            experts_labelled: experts.len(),
+        },
+    ))
 }

@@ -22,8 +22,6 @@ To use a running lanternfish server instead of the mock API, set
 LANTERNFISH_API=http://127.0.0.1:8791 npm run dev
 ```
 
-Do not use port 3000 or port 4095.
-
 ## Build output
 
 `npm run build` writes `dist/index.html` and `dist/assets/*`. All asset

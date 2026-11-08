@@ -77,9 +77,12 @@ struct Collector {
     layers: Vec<HashMap<usize, TokState>>,
     layer_attn_base: Vec<Option<(usize, String)>>,
     seen: std::collections::BTreeSet<String>,
-    probe: Option<Vec<(String, String, String, i64, i64)>>,
+    probe: Option<Vec<ProbeNode>>,
     buf: Vec<u8>,
 }
+
+/// A graph node seen by `probe`: (name, op, type, ne0, rows).
+pub type ProbeNode = (String, String, String, i64, i64);
 
 fn rms(x: &[f32]) -> f32 {
     (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
@@ -99,14 +102,28 @@ unsafe extern "C" fn eval_cb(t: *mut ffi::ggml_tensor, ask: bool, ud: *mut c_voi
         if !ask && !c.seen.contains(name.as_ref()) {
             c.seen.insert(name.to_string());
             let n = unsafe { ffi::ggml_nelements(t) };
-            let op = unsafe { CStr::from_ptr(ffi::ggml_op_name(t.op)) }.to_string_lossy().into_owned();
-            let ty = unsafe { CStr::from_ptr(ffi::ggml_type_name(t.type_)) }.to_string_lossy().into_owned();
-            p.push((name.to_string(), op, ty, t.ne[0], if t.ne[0] > 0 { n / t.ne[0] } else { 0 }));
+            let op = unsafe { CStr::from_ptr(ffi::ggml_op_name(t.op)) }
+                .to_string_lossy()
+                .into_owned();
+            let ty = unsafe { CStr::from_ptr(ffi::ggml_type_name(t.type_)) }
+                .to_string_lossy()
+                .into_owned();
+            p.push((
+                name.to_string(),
+                op,
+                ty,
+                t.ne[0],
+                if t.ne[0] > 0 { n / t.ne[0] } else { 0 },
+            ));
         }
         return true;
     }
-    let Some((base, layer)) = split_name(&name) else { return !ask };
-    let Some((role, prio)) = role_of(base) else { return !ask };
+    let Some((base, layer)) = split_name(&name) else {
+        return !ask;
+    };
+    let Some((role, prio)) = role_of(base) else {
+        return !ask;
+    };
     if ask {
         return true;
     }
@@ -132,7 +149,14 @@ unsafe extern "C" fn eval_cb(t: *mut ffi::ggml_tensor, ask: bool, ud: *mut c_voi
             for i2 in 0..t.ne[2] as usize {
                 for i1 in 0..t.ne[1] as usize {
                     let off = i1 * t.nb[1] + i2 * t.nb[2] + i3 * t.nb[3];
-                    unsafe { ffi::ggml_backend_tensor_get(tp, c.buf.as_mut_ptr().add(dst) as *mut c_void, off, row) };
+                    unsafe {
+                        ffi::ggml_backend_tensor_get(
+                            tp,
+                            c.buf.as_mut_ptr().add(dst) as *mut c_void,
+                            off,
+                            row,
+                        )
+                    };
                     dst += row;
                 }
             }
@@ -140,12 +164,22 @@ unsafe extern "C" fn eval_cb(t: *mut ffi::ggml_tensor, ask: bool, ud: *mut c_voi
     }
     c.seen.insert(base.to_string());
     let f: Vec<f32> = if is_f32 {
-        c.buf.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+        c.buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect()
     } else {
         Vec::new()
     };
     let iv: Vec<i32> = if is_i32 {
-        c.buf.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+        c.buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| i32::from_le_bytes(*b))
+            .collect()
     } else {
         Vec::new()
     };
@@ -162,7 +196,7 @@ unsafe extern "C" fn eval_cb(t: *mut ffi::ggml_tensor, ask: bool, ud: *mut c_voi
     if role == "residual" {
         if layer == 0 || c.streams.is_none() {
             // layer 0 is never pruned: its row count fixes the stream count for this step
-            if rows % c.n == 0 {
+            if rows.is_multiple_of(c.n) {
                 c.streams = Some(rows / c.n);
             }
         }
@@ -195,7 +229,11 @@ unsafe extern "C" fn eval_cb(t: *mut ffi::ggml_tensor, ask: bool, ud: *mut c_voi
             }
             "attn" | "ffn" => {
                 let v = rms(&f[k * ne0..(k + 1) * ne0]);
-                let slot = if role == "attn" { &mut st.attn } else { &mut st.ffn };
+                let slot = if role == "attn" {
+                    &mut st.attn
+                } else {
+                    &mut st.ffn
+                };
                 if slot.is_none_or(|(p, _)| prio < p) {
                     *slot = Some((prio, v));
                 }
@@ -268,12 +306,20 @@ fn load(path: &Path) -> Result<*mut ffi::llama_model> {
     let c = CString::new(path.to_string_lossy().as_bytes())?;
     let m = unsafe { ffi::llama_model_load_from_file(c.as_ptr(), mp) };
     if m.is_null() {
-        bail!("llama.cpp could not load {} (unsupported architecture?)", path.display());
+        bail!(
+            "llama.cpp could not load {} (unsupported architecture?)",
+            path.display()
+        );
     }
     Ok(m)
 }
 
-fn context(model: *mut ffi::llama_model, n_ctx: usize, opt: &Options, col: &mut Collector) -> Result<*mut ffi::llama_context> {
+fn context(
+    model: *mut ffi::llama_model,
+    n_ctx: usize,
+    opt: &Options,
+    col: &mut Collector,
+) -> Result<*mut ffi::llama_context> {
     let mut cp = unsafe { ffi::llama_context_default_params() };
     cp.n_ctx = n_ctx as u32;
     cp.n_batch = opt.ubatch as u32;
@@ -292,7 +338,8 @@ fn context(model: *mut ffi::llama_model, n_ctx: usize, opt: &Options, col: &mut 
 
 fn piece(vocab: *const ffi::llama_vocab, t: i32) -> String {
     let mut buf = [0 as c_char; 256];
-    let n = unsafe { ffi::llama_token_to_piece(vocab, t, buf.as_mut_ptr(), buf.len() as i32, 0, true) };
+    let n =
+        unsafe { ffi::llama_token_to_piece(vocab, t, buf.as_mut_ptr(), buf.len() as i32, 0, true) };
     if n <= 0 {
         return String::new();
     }
@@ -303,7 +350,15 @@ fn piece(vocab: *const ffi::llama_vocab, t: i32) -> String {
 fn tokenize(vocab: *const ffi::llama_vocab, text: &str) -> Result<Vec<i32>> {
     let mut toks = vec![0i32; text.len() + 16];
     let n = unsafe {
-        ffi::llama_tokenize(vocab, text.as_ptr() as *const c_char, text.len() as i32, toks.as_mut_ptr(), toks.len() as i32, true, true)
+        ffi::llama_tokenize(
+            vocab,
+            text.as_ptr() as *const c_char,
+            text.len() as i32,
+            toks.as_mut_ptr(),
+            toks.len() as i32,
+            true,
+            true,
+        )
     };
     if n < 0 {
         bail!("tokenization failed");
@@ -318,12 +373,19 @@ pub fn render_prompt(model: *mut ffi::llama_model, user: &str, think: bool) -> S
     if tmpl.is_null() {
         return user.to_string();
     }
-    let tmpl_s = unsafe { CStr::from_ptr(tmpl) }.to_string_lossy().into_owned();
+    let tmpl_s = unsafe { CStr::from_ptr(tmpl) }
+        .to_string_lossy()
+        .into_owned();
     let role = CString::new("user").unwrap();
     let content = CString::new(user.replace('\0', "")).unwrap();
-    let msg = ffi::llama_chat_message { role: role.as_ptr(), content: content.as_ptr() };
+    let msg = ffi::llama_chat_message {
+        role: role.as_ptr(),
+        content: content.as_ptr(),
+    };
     let mut buf = vec![0 as c_char; user.len() * 2 + 4096];
-    let n = unsafe { ffi::llama_chat_apply_template(tmpl, &msg, 1, true, buf.as_mut_ptr(), buf.len() as i32) };
+    let n = unsafe {
+        ffi::llama_chat_apply_template(tmpl, &msg, 1, true, buf.as_mut_ptr(), buf.len() as i32)
+    };
     if n < 0 || n as usize > buf.len() {
         return user.to_string();
     }
@@ -336,28 +398,55 @@ pub fn render_prompt(model: *mut ffi::llama_model, user: &str, think: bool) -> S
     s
 }
 
-pub fn run(path: &Path, hidden: usize, n_layers: usize, top_k: usize, user: &str, opt: &Options, progress: Progress) -> Result<Capture> {
+pub fn run(
+    path: &Path,
+    hidden: usize,
+    n_layers: usize,
+    top_k: usize,
+    user: &str,
+    opt: &Options,
+    progress: Progress,
+) -> Result<Capture> {
     progress("loading model", 0.0);
     let model = load(path)?;
-    let mut ll = Llama { model, ctx: std::ptr::null_mut() };
+    let mut ll = Llama {
+        model,
+        ctx: std::ptr::null_mut(),
+    };
     let vocab = unsafe { ffi::llama_model_get_vocab(model) };
-    let prompt = if opt.raw { user.to_string() } else { render_prompt(model, user, opt.think) };
+    let prompt = if opt.raw {
+        user.to_string()
+    } else {
+        render_prompt(model, user, opt.think)
+    };
     let mut toks = tokenize(vocab, &prompt)?;
     let nt = toks.len();
     if nt == 0 {
         bail!("empty prompt");
     }
     let mut col = Box::new(Collector {
-        hidden, top_k, first: 0, n: 0, streams: None,
+        hidden,
+        top_k,
+        first: 0,
+        n: 0,
+        streams: None,
         layers: vec![HashMap::new(); n_layers],
         layer_attn_base: vec![None; n_layers],
-        seen: Default::default(), probe: None, buf: Vec::new(),
+        seen: Default::default(),
+        probe: None,
+        buf: Vec::new(),
     });
     ll.ctx = context(model, nt + opt.n_predict + 16, opt, &mut col)?;
     let nv = unsafe { ffi::llama_vocab_n_tokens(vocab) } as usize;
     let mut out = Capture {
-        tokens: vec![], steps: vec![], next: vec![], layers: vec![], layer_attn_base: vec![],
-        captured: vec![], prompt: prompt.clone(), vocab: vec![],
+        tokens: vec![],
+        steps: vec![],
+        next: vec![],
+        layers: vec![],
+        layer_attn_base: vec![],
+        captured: vec![],
+        prompt: prompt.clone(),
+        vocab: vec![],
     };
     let top10 = |ctx: *mut ffi::llama_context| -> Vec<Cand> {
         let lg = unsafe { std::slice::from_raw_parts(ffi::llama_get_logits_ith(ctx, -1), nv) };
@@ -367,14 +456,25 @@ pub fn run(path: &Path, hidden: usize, n_layers: usize, top_k: usize, user: &str
         idx.sort_by(|a, b| lg[*b].total_cmp(&lg[*a]));
         let mx = lg[idx[0]];
         let z: f64 = lg.iter().map(|v| ((v - mx) as f64).exp()).sum();
-        idx.iter().map(|&i| Cand { id: i as i32, piece: piece(vocab, i as i32), p: (((lg[i] - mx) as f64).exp() / z) as f32 }).collect()
+        idx.iter()
+            .map(|&i| Cand {
+                id: i as i32,
+                piece: piece(vocab, i as i32),
+                p: (((lg[i] - mx) as f64).exp() / z) as f32,
+            })
+            .collect()
     };
     let mut pos = 0;
     let mut i = 0;
     while i < nt {
         let n = opt.ubatch.min(nt - i);
         for k in 0..n {
-            out.tokens.push(Token { id: toks[i + k], piece: piece(vocab, toks[i + k]), phase: "prefill", pos: pos + k });
+            out.tokens.push(Token {
+                id: toks[i + k],
+                piece: piece(vocab, toks[i + k]),
+                phase: "prefill",
+                pos: pos + k,
+            });
         }
         col.first = i;
         col.n = n;
@@ -383,7 +483,11 @@ pub fn run(path: &Path, hidden: usize, n_layers: usize, top_k: usize, user: &str
         if unsafe { ffi::llama_decode(ll.ctx, b) } != 0 {
             bail!("llama_decode failed in prefill");
         }
-        out.steps.push(Step { first: i, n, phase: "prefill" });
+        out.steps.push(Step {
+            first: i,
+            n,
+            phase: "prefill",
+        });
         let c = top10(ll.ctx);
         let nxt = c[0].id;
         out.next.push(c);
@@ -396,7 +500,12 @@ pub fn run(path: &Path, hidden: usize, n_layers: usize, top_k: usize, user: &str
     }
     for g in 0..opt.n_predict {
         let t = *toks.last().unwrap();
-        out.tokens.push(Token { id: t, piece: piece(vocab, t), phase: "decode", pos });
+        out.tokens.push(Token {
+            id: t,
+            piece: piece(vocab, t),
+            phase: "decode",
+            pos,
+        });
         if unsafe { ffi::llama_vocab_is_eog(vocab, t) } {
             break;
         }
@@ -407,7 +516,11 @@ pub fn run(path: &Path, hidden: usize, n_layers: usize, top_k: usize, user: &str
         if unsafe { ffi::llama_decode(ll.ctx, b) } != 0 {
             bail!("llama_decode failed in decode");
         }
-        out.steps.push(Step { first: pos, n: 1, phase: "decode" });
+        out.steps.push(Step {
+            first: pos,
+            n: 1,
+            phase: "decode",
+        });
         let c = top10(ll.ctx);
         toks.push(c[0].id);
         out.next.push(c);
@@ -433,15 +546,32 @@ pub fn layer_kind(base: &Option<(usize, String)>) -> &'static str {
 }
 
 /// One small forward pass that records every node: (name, op, type, ne0, rows).
-pub fn probe(path: &Path, threads: i32) -> Result<Vec<(String, String, String, i64, i64)>> {
+pub fn probe(path: &Path, threads: i32) -> Result<Vec<ProbeNode>> {
     let model = load(path)?;
-    let mut ll = Llama { model, ctx: std::ptr::null_mut() };
+    let mut ll = Llama {
+        model,
+        ctx: std::ptr::null_mut(),
+    };
     let vocab = unsafe { ffi::llama_model_get_vocab(model) };
     let mut col = Box::new(Collector {
-        hidden: 0, top_k: 0, first: 0, n: 0, streams: None, layers: vec![], layer_attn_base: vec![],
-        seen: Default::default(), probe: Some(vec![]), buf: vec![],
+        hidden: 0,
+        top_k: 0,
+        first: 0,
+        n: 0,
+        streams: None,
+        layers: vec![],
+        layer_attn_base: vec![],
+        seen: Default::default(),
+        probe: Some(vec![]),
+        buf: vec![],
     });
-    let opt = Options { n_predict: 0, threads, raw: true, think: false, ubatch: 64 };
+    let opt = Options {
+        n_predict: 0,
+        threads,
+        raw: true,
+        think: false,
+        ubatch: 64,
+    };
     ll.ctx = context(model, 64, &opt, &mut col)?;
     let mut toks = tokenize(vocab, "def add(a, b):")?;
     let b = unsafe { ffi::llama_batch_get_one(toks.as_mut_ptr(), toks.len() as i32) };

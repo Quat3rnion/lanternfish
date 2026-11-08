@@ -86,13 +86,19 @@ enum Cmd {
 }
 
 fn default_threads() -> i32 {
-    std::thread::available_parallelism().map(|n| n.get() as i32 / 2).unwrap_or(8).max(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get() as i32 / 2)
+        .unwrap_or(8)
+        .max(1)
 }
 
 fn home(cli: &Cli) -> PathBuf {
     cli.home.clone().unwrap_or_else(|| {
-        let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
+            });
         base.join("lanternfish")
     })
 }
@@ -104,7 +110,11 @@ fn main() -> Result<()> {
     }
     let store = Store::new(home(&cli))?;
     match cli.cmd {
-        Cmd::Probe { model, all, threads } => {
+        Cmd::Probe {
+            model,
+            all,
+            threads,
+        } => {
             let m = ModelFile::open(&model)?;
             println!("{}", serde_json::to_string(&m.s)?);
             let nodes = capture::probe(&model, threads)?;
@@ -115,8 +125,18 @@ fn main() -> Result<()> {
                 }
             }
             for (role, names) in ROLES {
-                let found: Vec<String> = names.iter().filter_map(|n| bases.get(*n).map(|c| format!("{n} ({c} layers)"))).collect();
-                println!("  {role:12} {}", if found.is_empty() { "-- not found".into() } else { found.join(", ") });
+                let found: Vec<String> = names
+                    .iter()
+                    .filter_map(|n| bases.get(*n).map(|c| format!("{n} ({c} layers)")))
+                    .collect();
+                println!(
+                    "  {role:12} {}",
+                    if found.is_empty() {
+                        "-- not found".into()
+                    } else {
+                        found.join(", ")
+                    }
+                );
             }
             if all {
                 for (b, c) in &bases {
@@ -124,10 +144,25 @@ fn main() -> Result<()> {
                 }
             }
             let tsv = store.home.join("probe.tsv");
-            std::fs::write(&tsv, nodes.iter().map(|(n, o, t, a, b)| format!("{n}\t{o}\t{t}\t{a}\t{b}\n")).collect::<String>())?;
+            std::fs::write(
+                &tsv,
+                nodes
+                    .iter()
+                    .map(|(n, o, t, a, b)| format!("{n}\t{o}\t{t}\t{a}\t{b}\n"))
+                    .collect::<String>(),
+            )?;
             println!("full node list: {}", tsv.display());
         }
-        Cmd::Run { model, name, prompt, n, raw, think, threads, labels } => {
+        Cmd::Run {
+            model,
+            name,
+            prompt,
+            n,
+            raw,
+            think,
+            threads,
+            labels,
+        } => {
             let t0 = std::time::Instant::now();
             let last = std::sync::Mutex::new(String::new());
             let progress = |phase: &str, f: f32| {
@@ -138,29 +173,56 @@ fn main() -> Result<()> {
                 }
                 let _ = f;
             };
-            let req = RunRequest { model, name: name.clone(), prompt, n, raw, think };
+            let req = RunRequest {
+                model,
+                name: name.clone(),
+                prompt,
+                n,
+                raw,
+                think,
+            };
             let s = jobs::trace(&store, &req, &TraceParams { threads, labels }, &progress)?;
-            println!("{}", serde_json::json!({"name": name, "tokens": s.tokens, "lens_agreement": s.lens_agreement,
+            println!(
+                "{}",
+                serde_json::json!({"name": name, "tokens": s.tokens, "lens_agreement": s.lens_agreement,
                 "experts_labelled": s.experts_labelled, "seconds": t0.elapsed().as_secs(),
-                "path": store.dir(&name)?.join("viz.json")}));
+                "path": store.dir(&name)?.join("viz.json")})
+            );
         }
         Cmd::List => {
             for m in store.list() {
-                println!("{}\t{}\t{} tokens\t{}", m["name"].as_str().unwrap_or(""), m["model"]["name"].as_str().unwrap_or(""),
-                    m["tokens"], m["created"].as_str().unwrap_or(""));
+                println!(
+                    "{}\t{}\t{} tokens\t{}",
+                    m["name"].as_str().unwrap_or(""),
+                    m["model"]["name"].as_str().unwrap_or(""),
+                    m["tokens"],
+                    m["created"].as_str().unwrap_or("")
+                );
             }
         }
-        Cmd::Serve { host, port, models_dir, threads, labels } => {
+        Cmd::Serve {
+            host,
+            port,
+            models_dir,
+            threads,
+            labels,
+        } => {
             let queue = jobs::Queue::start(store.clone(), TraceParams { threads, labels });
-            let app = server::App { store, queue, model_dirs: Arc::new(models_dir) };
+            let app = server::App {
+                store,
+                queue,
+                model_dirs: Arc::new(models_dir),
+            };
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async move {
                 let addr = format!("{host}:{port}");
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 eprintln!("lanternfish UI on http://{addr}/");
-                axum::serve(listener, server::router(app)).with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                }).await?;
+                axum::serve(listener, server::router(app))
+                    .with_graceful_shutdown(async {
+                        let _ = tokio::signal::ctrl_c().await;
+                    })
+                    .await?;
                 anyhow::Ok(())
             })?;
         }

@@ -24,8 +24,10 @@ fn main() {
         }
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    b.generate().expect("bindgen failed: is llama.h installed? set LLAMA_INCLUDE_DIR")
-        .write_to_file(out.join("bindings.rs")).unwrap();
+    b.generate()
+        .expect("bindgen failed: is llama.h installed? set LLAMA_INCLUDE_DIR")
+        .write_to_file(out.join("bindings.rs"))
+        .unwrap();
 
     if let Ok(lib) = env::var("LLAMA_LIB_DIR") {
         println!("cargo:rustc-link-search=native={lib}");

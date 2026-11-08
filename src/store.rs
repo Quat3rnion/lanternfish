@@ -25,8 +25,12 @@ impl Store {
     }
 
     pub fn label_cache(&self, model: &Path) -> PathBuf {
-        let stem = model.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        self.home.join(format!("expert-labels-{}.json", crate::util::slug(&stem)))
+        let stem = model
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.home
+            .join(format!("expert-labels-{}.json", crate::util::slug(&stem)))
     }
 
     pub fn save(&self, name: &str, viz: &Value) -> Result<()> {
@@ -51,7 +55,9 @@ impl Store {
     /// Newest first. Traces without meta.json (older tools) get one derived from viz.json.
     pub fn list(&self) -> Vec<Value> {
         let mut out: Vec<(std::time::SystemTime, Value)> = vec![];
-        let Ok(rd) = std::fs::read_dir(self.home.join("traces")) else { return vec![] };
+        let Ok(rd) = std::fs::read_dir(self.home.join("traces")) else {
+            return vec![];
+        };
         for e in rd.flatten() {
             let d = e.path();
             let viz = d.join("viz.json");
@@ -70,7 +76,7 @@ impl Store {
                 out.push((md.modified().unwrap_or(std::time::UNIX_EPOCH), m));
             }
         }
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|e| std::cmp::Reverse(e.0));
         out.into_iter().map(|x| x.1).collect()
     }
 
@@ -96,7 +102,11 @@ pub fn scan_models(dirs: &[PathBuf]) -> Vec<Value> {
                 let n = e.file_name().to_string_lossy().into_owned();
                 let lower = n.to_lowercase();
                 let shard_ok = !lower.contains("-of-0") || lower.contains("-00001-of-");
-                if lower.ends_with(".gguf") && !lower.contains("mmproj") && !lower.starts_with("ggml-vocab") && shard_ok {
+                if lower.ends_with(".gguf")
+                    && !lower.contains("mmproj")
+                    && !lower.starts_with("ggml-vocab")
+                    && shard_ok
+                {
                     let size = e.metadata().map(|m| m.len()).unwrap_or(0);
                     if size > 50 << 20 {
                         out.push(json!({"path": p, "name": n, "size_bytes": size}));

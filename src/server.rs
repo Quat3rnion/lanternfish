@@ -39,7 +39,8 @@ async fn health(State(a): State<App>) -> Response {
         "traces": a.store.list().len(),
         "runs_active": runs.iter().filter(|r| r.state == "running" || r.state == "queued").count(),
         "model_dirs": *a.model_dirs,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 async fn traces(State(a): State<App>) -> Response {
@@ -58,7 +59,12 @@ async fn trace(State(a): State<App>, UrlPath(name): UrlPath<String>) -> Response
 
 async fn models(State(a): State<App>) -> Response {
     let dirs = a.model_dirs.clone();
-    Json(tokio::task::spawn_blocking(move || scan_models(&dirs)).await.unwrap_or_default()).into_response()
+    Json(
+        tokio::task::spawn_blocking(move || scan_models(&dirs))
+            .await
+            .unwrap_or_default(),
+    )
+    .into_response()
 }
 
 async fn runs(State(a): State<App>) -> Response {
@@ -70,16 +76,26 @@ async fn submit(State(a): State<App>, Json(req): Json<RunRequest>) -> Response {
         return err(StatusCode::BAD_REQUEST, e);
     }
     if req.prompt.trim().is_empty() || req.n > 4096 {
-        return err(StatusCode::BAD_REQUEST, "prompt must be non-empty and n <= 4096");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "prompt must be non-empty and n <= 4096",
+        );
     }
     // Only models found under the configured directories may be run.
     let dirs = a.model_dirs.clone();
     let wanted = req.model.clone();
     let allowed = tokio::task::spawn_blocking(move || {
-        scan_models(&dirs).iter().any(|m| m["path"].as_str() == Some(&wanted.to_string_lossy()))
-    }).await.unwrap_or(false);
+        scan_models(&dirs)
+            .iter()
+            .any(|m| m["path"].as_str() == Some(&wanted.to_string_lossy()))
+    })
+    .await
+    .unwrap_or(false);
     if !allowed {
-        return err(StatusCode::BAD_REQUEST, "model is not in the server's model directories (see GET /api/models)");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "model is not in the server's model directories (see GET /api/models)",
+        );
     }
     Json(json!({"id": a.queue.submit(req)})).into_response()
 }
@@ -87,11 +103,23 @@ async fn submit(State(a): State<App>, Json(req): Json<RunRequest>) -> Response {
 async fn static_file(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
-    let file = Ui::get(path).or_else(|| (!path.starts_with("api/")).then(|| Ui::get("index.html")).flatten());
+    let file = Ui::get(path).or_else(|| {
+        (!path.starts_with("api/"))
+            .then(|| Ui::get("index.html"))
+            .flatten()
+    });
     match file {
         Some(f) => {
-            let mime = mime_guess::from_path(if Ui::get(path).is_some() { path } else { "index.html" }).first_or_octet_stream();
-            Response::builder().header(header::CONTENT_TYPE, mime.as_ref()).body(Body::from(f.data.into_owned())).unwrap()
+            let mime = mime_guess::from_path(if Ui::get(path).is_some() {
+                path
+            } else {
+                "index.html"
+            })
+            .first_or_octet_stream();
+            Response::builder()
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(Body::from(f.data.into_owned()))
+                .unwrap()
         }
         None => err(StatusCode::NOT_FOUND, "not found"),
     }

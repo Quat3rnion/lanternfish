@@ -29,7 +29,10 @@ pub struct TensorInfo {
 impl Gguf {
     pub fn open(path: &Path) -> Result<Self> {
         let c = CString::new(path.to_string_lossy().as_bytes())?;
-        let params = ffi::gguf_init_params { no_alloc: true, ctx: std::ptr::null_mut() };
+        let params = ffi::gguf_init_params {
+            no_alloc: true,
+            ctx: std::ptr::null_mut(),
+        };
         let ctx = unsafe { ffi::gguf_init_from_file(c.as_ptr(), params) };
         if ctx.is_null() {
             bail!("not a readable GGUF file: {}", path.display());
@@ -37,7 +40,11 @@ impl Gguf {
         let file = File::open(path)?;
         let map = unsafe { Mmap::map(&file)? };
         let data_offset = unsafe { ffi::gguf_get_data_offset(ctx) };
-        Ok(Self { ctx, map, data_offset })
+        Ok(Self {
+            ctx,
+            map,
+            data_offset,
+        })
     }
 
     fn key(&self, k: &str) -> Option<i64> {
@@ -52,7 +59,11 @@ impl Gguf {
             if ffi::gguf_get_kv_type(self.ctx, id) != ffi::gguf_type::GGUF_TYPE_STRING {
                 return None;
             }
-            Some(CStr::from_ptr(ffi::gguf_get_val_str(self.ctx, id)).to_string_lossy().into_owned())
+            Some(
+                CStr::from_ptr(ffi::gguf_get_val_str(self.ctx, id))
+                    .to_string_lossy()
+                    .into_owned(),
+            )
         }
     }
 
@@ -90,7 +101,9 @@ impl Gguf {
 
     /// Dequantize `rows` rows of `row_len` elements, starting at row `first`.
     pub fn rows(&self, name: &str, row_len: usize, first: usize, rows: usize) -> Result<Vec<f32>> {
-        let t = self.tensor(name).ok_or_else(|| anyhow!("tensor {name} not in GGUF"))?;
+        let t = self
+            .tensor(name)
+            .ok_or_else(|| anyhow!("tensor {name} not in GGUF"))?;
         let row_bytes = unsafe { ffi::ggml_row_size(t.ty, row_len as i64) };
         let start = t.offset + first * row_bytes;
         let end = start + rows * row_bytes;
@@ -114,13 +127,15 @@ pub fn to_float(ty: ffi::ggml_type, src: &[u8], out: &mut [f32]) -> Result<()> {
     use ffi::ggml_type::*;
     match ty {
         GGML_TYPE_F32 => {
-            for (o, c) in out.iter_mut().zip(src.chunks_exact(4)) {
-                *o = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            for (o, c) in out.iter_mut().zip(src.as_chunks::<4>().0) {
+                *o = f32::from_le_bytes(*c);
             }
         }
         _ => {
             let traits = unsafe { &*ffi::ggml_get_type_traits(ty) };
-            let f = traits.to_float.ok_or_else(|| anyhow!("ggml has no to_float for type {ty:?}"))?;
+            let f = traits
+                .to_float
+                .ok_or_else(|| anyhow!("ggml has no to_float for type {ty:?}"))?;
             // ggml dequantizes whole blocks; split into large chunks for rayon.
             let blck = unsafe { ffi::ggml_blck_size(ty) } as usize;
             let bsz = unsafe { ffi::ggml_type_size(ty) };

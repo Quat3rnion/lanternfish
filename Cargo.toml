@@ -2,9 +2,12 @@
 name = "lanternfish"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Trace and visualize how a llama.cpp model routes each token through its layers and experts"
+readme = "README.md"
+keywords = ["llama-cpp", "interpretability", "logit-lens", "mixture-of-experts", "gguf"]
 license = "Apache-2.0"
-repository = "https://git.lumina.software/quaternion/lanternfish"
+repository = "https://github.com/Quat3rnion/lanternfish"
 
 [dependencies]
 anyhow = "1"

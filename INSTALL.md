@@ -1,21 +1,25 @@
-# INSTALL (for agents)
+# Install
 
 Do the steps in order. Each step ends with a check. If a check fails, stop
-and report the output.
+and read the output before you continue. The steps are also written so that
+a script or a coding agent can follow them.
 
 Choose one method:
 
-- **A. Docker** (recommended): no local toolchain needed.
-- **B. From source**: when the host already has llama.cpp, or Docker is
-  not available.
+- **A. Docker** (recommended): you do not need a local toolchain.
+- **B. From source**: use this when the host already has llama.cpp, or when
+  Docker is not available.
 
-Before you start, find out from the operator:
+Before you start, find these values:
 
-1. The directory that contains the GGUF models (here: `MODELS_DIR`).
-2. The port to use (default 8791). Do not use a port that is already in
-   use (`ss -ltn | grep :8791`).
-3. Directories that you must not use for temporary files (some hosts do
-   not allow `/tmp`).
+1. The directory that contains your GGUF models. These steps call it
+   `MODELS_DIR`.
+2. The port to use (default 8791). Make sure that no other program uses it
+   (`ss -ltn | grep :8791`).
+3. On some hosts, `/tmp` is small or not permitted. If so, select a
+   different directory for temporary build files.
+
+lanternfish runs on Linux x86-64. Other platforms are not tested.
 
 ## A. Docker
 
@@ -25,13 +29,14 @@ Before you start, find out from the operator:
 docker version --format '{{.Server.Version}}'
 ```
 
-Check: prints a version. If permission is denied, the user is not in the
-`docker` group. Ask the operator.
+Check: the command prints a version. If permission is denied, your user is
+not in the `docker` group. Add it (`sudo usermod -aG docker $USER`, then log
+in again), or ask the administrator of the host.
 
 ### A2. Get the source and build the image
 
 ```sh
-git clone https://git.lumina.software/quaternion/lanternfish
+git clone https://github.com/Quat3rnion/lanternfish
 cd lanternfish
 docker build -t lanternfish .
 ```
@@ -76,22 +81,23 @@ docker exec lanternfish lanternfish run /models/SMALL_MODEL.gguf \
 Check: `probe` shows `residual` found on every layer. `run` prints JSON with
 `"lens_agreement"`. For a standard dense model, the value is above 0.8.
 
-### A5. Report
+### A5. Open the UI
 
-Give the operator the URL `http://HOST:8791/` and the name of the test trace.
+Open `http://HOST:8791/` in a browser and select the trace `install-check`.
 
 ## B. From source
 
 ### B1. Requirements
 
 ```sh
-cargo --version          # 1.85 or later
+cargo --version          # 1.88 or later
 node --version           # 20 or later
 ls /usr/lib/libclang.so* /usr/lib/*/libclang*.so* 2>/dev/null | head -1
 ```
 
-Check: all three print something. Install a missing part with the system
-package manager (`clang` or `libclang-dev` gives libclang).
+Check: all three commands print something. Install a missing part with the
+system package manager. The package `clang` or `libclang-dev` gives
+libclang. Use [rustup](https://rustup.rs) for a current Rust.
 
 ### B2. llama.cpp
 
@@ -116,7 +122,7 @@ versions fail with "unknown model architecture" in `lanternfish probe`.
 ### B3. Build
 
 ```sh
-git clone https://git.lumina.software/quaternion/lanternfish
+git clone https://github.com/Quat3rnion/lanternfish
 cd lanternfish
 npm --prefix web ci
 npm --prefix web run build

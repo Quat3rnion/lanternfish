@@ -31,7 +31,7 @@ You can start new traces from the browser and watch their progress.
 ## Quick start with Docker
 
 ```sh
-git clone https://git.lumina.software/quaternion/lanternfish
+git clone https://github.com/Quat3rnion/lanternfish
 cd lanternfish
 docker build -t lanternfish .
 docker run -d --name lanternfish -p 8791:8791 \
@@ -53,8 +53,8 @@ The first build compiles llama.cpp and takes about 5 to 15 minutes.
 
 ## Quick start without Docker
 
-You need Rust, Node.js and an installed llama.cpp (shared libraries and
-headers). Full steps: [INSTALL.md](INSTALL.md).
+You need Rust 1.88 or later, Node.js 20 or later, libclang, and llama.cpp
+(shared libraries and headers). Full steps: [INSTALL.md](INSTALL.md).
 
 ```sh
 npm --prefix web ci && npm --prefix web run build
@@ -112,13 +112,38 @@ with the model's own output head. Details:
 
 | Document | For |
 |---|---|
-| [INSTALL.md](INSTALL.md) | Installing with Docker or from source (written for agents) |
+| [INSTALL.md](INSTALL.md) | Installing with Docker or from source, with a check after each step |
 | [docs/USAGE.md](docs/USAGE.md) | Every command and option, the UI, the HTTP API |
 | [docs/DOCKER.md](docs/DOCKER.md) | Image details, volumes, llama.cpp version, GPU notes |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How a trace is made, and how to support a new model architecture |
 | [docs/FORMAT.md](docs/FORMAT.md) | The trace file format |
 | [web/README.md](web/README.md) | Developing the UI |
 
-## Licence
+## Contributing
 
-Apache-2.0. See [LICENSE](LICENSE).
+Bug reports and pull requests are welcome on
+[GitHub](https://github.com/Quat3rnion/lanternfish/issues). Before you send
+a pull request, run:
+
+```sh
+cargo fmt --check
+cargo clippy --release --all-targets
+cargo test --release
+npm --prefix web run check
+```
+
+To support a new model architecture, read
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) first. Usually you only add
+node names.
+
+## License
+
+Copyright 2026 quaternion.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Unless you explicitly state otherwise, any contribution that you submit for
+inclusion in this project is licensed under the same terms, without any
+additional terms or conditions.
+
+lanternfish links to [llama.cpp](https://github.com/ggml-org/llama.cpp) and
+ggml, which are under the MIT license.
