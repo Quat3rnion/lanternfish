@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check explicit CPU/CUDA gradients and time the W9 ROME factor calculation.
+"""Check CPU and GPU gradients and time the W9 ROME factor calculation.
 
 Run both backends under gpu-turn.sh (with build-gate.sh quiet for timing).
 Pass --cpu-only to check the CPU reference without a GPU turn.
@@ -91,7 +91,7 @@ def load_json(path):
     return json.loads(path.read_text())
 
 
-def fp64_oracle(path, pin, identity):
+def fp64_oracle(path, pin, identity, backend="cuda"):
     """Verify a pinned same-operand projection oracle for this runtime and run."""
     payload = path.read_bytes()
     actual = hashlib.sha256(payload).hexdigest()
@@ -106,10 +106,10 @@ def fp64_oracle(path, pin, identity):
             and rows[0].get("operand_set") == FP64_OPERAND_SET,
             f"expected FP64 operand set {FP64_OPERAND_SET}")
     case = rows[0]
-    cpu, cuda = case.get("cpu_max_abs_error"), case.get("cuda_max_abs_error")
-    require(all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in (cpu, cuda)),
+    cpu, gpu = case.get("cpu_max_abs_error"), case.get(f"{backend}_max_abs_error")
+    require(all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in (cpu, gpu)),
             "FP64 oracle errors must be finite and nonnegative")
-    passed = cuda <= min(cpu, FP64_ATOL)
+    passed = gpu <= min(cpu, FP64_ATOL)
     return {"path": str(path), "sha256": actual, "passed": passed, **identity,
             "cases": [dict(case, passed=passed)]}
 
@@ -171,7 +171,7 @@ def gradient(args, work, label, model, prompt, target, layer, shape, backend):
     out = work / label
     run_cli(args, label, "grad", "--model", model, "--prompt", prompt,
             "--target-token", str(target), "--layer", str(layer), "--out", out,
-            "--backend", backend, audit=(backend == "cuda"))
+            "--backend", backend, audit=(backend != "cpu"))
     manifest = out / "manifest.json"
     doc = load_json(manifest)
     (args.evidence / f"{label}-manifest.json").write_bytes(manifest.read_bytes())
@@ -182,7 +182,7 @@ def gradient(args, work, label, model, prompt, target, layer, shape, backend):
             and doc["position"] == len(doc["tokens"]) - 1 and math.isfinite(doc["loss"]),
             f"{label}: invalid gradient manifest")
     provenance = check_backend(doc, backend)
-    if backend == "cuda":
+    if backend != "cpu":
         doc["placement"] = audit_log(args.evidence, label, provenance["device"], {"backward"})
     tensor = doc["tensor"]
     tensor_file = out / tensor["file"]
@@ -200,19 +200,19 @@ def gradient(args, work, label, model, prompt, target, layer, shape, backend):
     return doc, grad
 
 
-def compare_gradients(cpu, cuda):
+def compare_gradients(cpu, gpu, backend):
     cpu_doc, cpu_grad = cpu
-    cuda_doc, cuda_grad = cuda
-    require(cpu_doc["tokens"] == cuda_doc["tokens"], "gradient tokenization mismatch")
-    return gradient_parity(cpu_grad, cuda_grad, cpu_doc["loss"], cuda_doc["loss"])
+    gpu_doc, gpu_grad = gpu
+    require(cpu_doc["tokens"] == gpu_doc["tokens"], "gradient tokenization mismatch")
+    return gradient_parity(cpu_grad, gpu_grad, cpu_doc["loss"], gpu_doc["loss"], backend)
 
 
-def gradient_parity(cpu_grad, cuda_grad, cpu_loss, cuda_loss):
-    stats = compare(cpu_grad, cuda_grad, atol=GRAD_ATOL, rtol=GRAD_RTOL)
-    loss_error = abs(cpu_loss - cuda_loss)
+def gradient_parity(cpu_grad, gpu_grad, cpu_loss, gpu_loss, backend="cuda"):
+    stats = compare(cpu_grad, gpu_grad, atol=GRAD_ATOL, rtol=GRAD_RTOL)
+    loss_error = abs(cpu_loss - gpu_loss)
     relative = stats["relative_linf_error"]
     pointwise = stats.pop("passed")
-    return {**stats, "cpu_loss": cpu_loss, "cuda_loss": cuda_loss,
+    return {**stats, "cpu_loss": cpu_loss, f"{backend}_loss": gpu_loss,
             "absolute_loss_error": loss_error,
             "pointwise_passed": pointwise,
             "relative_linf_passed": relative is not None and relative <= GRAD_REL_LINF,
@@ -296,16 +296,18 @@ def main():
     parser.add_argument("--evidence", type=Path, required=True, help="A new evidence directory")
     parser.add_argument("--threads", type=int, default=6)
     parser.add_argument("--cpu-only", action="store_true", help="Check the CPU reference only")
+    parser.add_argument("--backend", choices=("cuda", "rocm"), default="cuda")
     parser.add_argument("--oracle", type=Path, help="Pinned FP64 projection evidence JSON")
     parser.add_argument("--oracle-sha256", help="Required SHA-256 of the FP64 evidence JSON")
     args = parser.parse_args()
     args.binary = args.binary.resolve(strict=True)
     args.evidence.mkdir(parents=True, exist_ok=False)
-    backends = ("cpu",) if args.cpu_only else ("cpu", "cuda")
+    gpu = args.backend
+    backends = ("cpu",) if args.cpu_only else ("cpu", gpu)
     held_out_names = {name for name, _, _ in HELD_OUT}
     report = {
         "qualification": "not release-qualified",
-        "check_mode": "cpu_reference" if args.cpu_only else "cuda_acceptance",
+        "check_mode": "cpu_reference" if args.cpu_only else f"{gpu}_acceptance",
         "backends": backends,
         "binary": str(args.binary), "binary_sha256": digest(args.binary),
         "threads": args.threads, "model": str(MODEL), "model_sha256": digest(MODEL),
@@ -325,9 +327,9 @@ def main():
     checks = []
     try:
         require(report["model_sha256"] == MODEL_HASH, "Qwen F32 reference hash mismatch")
-        if "cuda" in backends:
+        if not args.cpu_only:
             require(args.oracle is not None and args.oracle_sha256 is not None,
-                    "CUDA acceptance requires --oracle and --oracle-sha256")
+                    f"{gpu} acceptance requires --oracle and --oracle-sha256")
             require(args.oracle.is_file(), f"FP64 oracle does not exist: {args.oracle}")
         with tempfile.TemporaryDirectory(prefix="w14b-", dir="/arboretum/tmp") as directory:
             work = Path(directory)
@@ -336,7 +338,7 @@ def main():
             report["tiny_model_sha256"] = digest(tiny)
             suites = [("tiny", tiny, "abc", 6, (0, 1), [32, 64]),
                       ("qwen", MODEL, QWEN_PROMPT, QWEN_TARGET, QWEN_LAYERS, [896, 4864])]
-            if "cuda" in backends:
+            if not args.cpu_only:
                 suites.extend((name, MODEL, prompt, target, QWEN_LAYERS, [896, 4864])
                               for name, prompt, target in HELD_OUT)
             for name, model, prompt, target, layers, shape in suites:
@@ -349,10 +351,10 @@ def main():
                     row = {b: {"loss": doc["loss"], "tensor_sha256": doc["tensor"]["sha256"],
                                 "provenance": doc["provenance"]} for b, (doc, _) in grads.items()}
                     row.update(prompt=prompt, target_token=target, held_out=name in held_out_names)
-                    if "cuda" in grads:
-                        parity = compare_gradients(grads["cpu"], grads["cuda"])
+                    if gpu in grads:
+                        parity = compare_gradients(grads["cpu"], grads[gpu], gpu)
                         row["parity"] = parity
-                        row["cuda"]["placement"] = grads["cuda"][0]["placement"]
+                        row[gpu]["placement"] = grads[gpu][0]["placement"]
                         checks.append(parity["loss_passed"])
                         if row["held_out"]:
                             checks.append(parity["relative_linf_passed"])
@@ -361,13 +363,13 @@ def main():
                         fd = finite_differences(args, work, layer, grads)
                         report["finite_differences"][label] = fd
                         checks.extend(row["passed"] for row in fd)
-            if "cuda" in backends:
+            if not args.cpu_only:
                 oracle = fp64_oracle(args.oracle, args.oracle_sha256, {
                     "binary_sha256": report["binary_sha256"],
                     "model_sha256": report["model_sha256"],
                     "gradient_sha256": {b: report["gradients"]["qwen-23"][b]["tensor_sha256"]
                                         for b in backends},
-                })
+                }, gpu)
                 report["fp64_oracle"] = oracle
                 checks.append(oracle["passed"])
             samples = {b: [] for b in backends}
@@ -385,10 +387,10 @@ def main():
                     "warmup": runs[0], "measured": runs[1:], "median_seconds": median(measured),
                     "min_seconds": min(measured), "max_seconds": max(measured),
                 }
-            if "cuda" in backends:
-                report["rome"]["cpu_over_cuda_speedup"] = (
-                    report["rome"]["cpu"]["median_seconds"] / report["rome"]["cuda"]["median_seconds"])
-                audited = time_edit(args, work, "cuda", "placement", audit=True)
+            if not args.cpu_only:
+                report["rome"][f"cpu_over_{gpu}_speedup"] = (
+                    report["rome"]["cpu"]["median_seconds"] / report["rome"][gpu]["median_seconds"])
+                audited = time_edit(args, work, gpu, "placement", audit=True)
                 audited.pop("seconds")  # Verbose logging is not in the timed samples.
                 report["rome"]["placement_run"] = audited
                 checks.append(audited["passed"])

@@ -54,3 +54,13 @@ class BackwardBackendTests(unittest.TestCase):
                 self.assertGreater(job.returncode, 0, job.stderr)
                 self.assertIn("cuda backend unavailable", job.stderr)
                 self.assertFalse(out.exists())
+
+    def test_rocm_without_visible_device_fails_without_export(self):
+        env = dict(os.environ, HIP_VISIBLE_DEVICES="-1")
+        for cmd in ("grad", "locate-edit"):
+            with self.subTest(cmd=cmd):
+                out = self.root / f"{cmd}.json"
+                job = self.run_backward(cmd, out, "--backend", "rocm", env=env)
+                self.assertGreater(job.returncode, 0, job.stderr)
+                self.assertIn("rocm backend unavailable", job.stderr)
+                self.assertFalse(out.exists())
