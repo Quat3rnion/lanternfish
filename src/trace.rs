@@ -89,6 +89,8 @@ struct Rule {
 enum Operation {
     Add { vector: Vec<f32> },
     Replace { vector: Vec<f32> },
+    ProjectOut { vector: Vec<f32> },
+    Subtract { vector: Vec<f32>, scale: f32 },
     Scale { factor: f32 },
     Zero,
 }
@@ -96,12 +98,28 @@ enum Operation {
 impl Operation {
     fn validate(&self, hidden: usize) -> Result<()> {
         match self {
-            Self::Add { vector } | Self::Replace { vector } => ensure!(
+            Self::Add { vector }
+            | Self::Replace { vector }
+            | Self::ProjectOut { vector }
+            | Self::Subtract { vector, .. } => ensure!(
                 vector.len() == hidden && vector.iter().all(|v| v.is_finite()),
                 "intervention vector must contain {hidden} finite values"
             ),
             Self::Scale { factor } => ensure!(factor.is_finite(), "scale must be finite"),
             Self::Zero => {}
+        }
+        match self {
+            Self::ProjectOut { vector } => ensure!(
+                vector.iter().any(|&v| v != 0.0),
+                "projection direction must be nonzero"
+            ),
+            Self::Subtract { scale, .. } => {
+                ensure!(
+                    scale.is_finite() && *scale >= 0.0,
+                    "subtraction scale must be finite and nonnegative"
+                )
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -110,6 +128,25 @@ impl Operation {
         match self {
             Self::Add { vector } => row.iter_mut().zip(vector).for_each(|(a, b)| *a += b),
             Self::Replace { vector } => row.copy_from_slice(vector),
+            Self::ProjectOut { vector } => {
+                // F64 keeps the norm squared representable for finite F32 directions.
+                let (dot, norm_squared) =
+                    row.iter()
+                        .zip(vector)
+                        .fold((0.0, 0.0), |(dot, norm_squared), (&x, &d)| {
+                            let d = f64::from(d);
+                            (dot + f64::from(x) * d, norm_squared + d * d)
+                        });
+                let coefficient = dot / norm_squared;
+                for (x, &d) in row.iter_mut().zip(vector) {
+                    *x = (f64::from(*x) - coefficient * f64::from(d)) as f32;
+                }
+            }
+            Self::Subtract { vector, scale } => {
+                for (x, &d) in row.iter_mut().zip(vector) {
+                    *x -= *scale * d;
+                }
+            }
             Self::Scale { factor } => row.iter_mut().for_each(|a| *a *= factor),
             Self::Zero => row.fill(0.0),
         }
