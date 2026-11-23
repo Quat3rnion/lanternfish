@@ -119,7 +119,17 @@ impl Device {
         params.devices = devices.as_mut_ptr();
         params.use_extra_bufts = false;
         params.n_gpu_layers = 0;
+        let mut overrides = [ffi::llama_model_tensor_buft_override::default(); 2];
         if self.is_cuda() {
+            let buft = unsafe { ffi::ggml_backend_dev_buffer_type(self.raw) };
+            ensure!(!buft.is_null(), "no device buffer type for {}", self.name());
+            // llama.cpp normally puts token embeddings on the CPU. Keep the
+            // lookup on CUDA along with the rest of the graph.
+            overrides[0] = ffi::llama_model_tensor_buft_override {
+                pattern: c"^token_embd\\.weight$".as_ptr(),
+                buft,
+            };
+            params.tensor_buft_overrides = overrides.as_ptr();
             params.n_gpu_layers = i32::MAX;
             params.split_mode = ffi::llama_split_mode_LLAMA_SPLIT_MODE_NONE;
         }
@@ -134,6 +144,7 @@ impl Device {
         let mut params = capture::cpu_context_params(n, n, threads);
         params.op_offload = self.is_cuda();
         params.offload_kqv = self.is_cuda();
+        params.lanternfish_gpu_only = self.is_cuda();
         params
     }
 }

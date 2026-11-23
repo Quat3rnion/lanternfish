@@ -5,11 +5,12 @@ Use `lanternfish locate-edit --model MODEL.gguf --request request.json
 does not write to `MODEL.gguf`. It returns low-rank factors for
 `blk.N.ffn_down.weight`.
 
-The default backend for gradients is `cpu`. Use `--backend cuda` to select
+The default backend is `cpu`. Use `--backend cuda` to select
 the first visible CUDA device. The command fails if the device is not
-available or a backward operation cannot run on it. The JSON output records
-the backend and ggml device name in `provenance`. The factor solve stays on
-the CPU.
+available or a forward or backward graph operation cannot run on it.
+The JSON output records the backend and ggml device name in `provenance`.
+The factor solve stays on the CPU, and data transfers between the host
+and the device are allowed.
 
 The request uses this format:
 

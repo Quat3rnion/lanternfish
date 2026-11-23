@@ -34,7 +34,7 @@ pub(crate) struct Args {
     cache: PathBuf,
     #[arg(long)]
     out: PathBuf,
-    /// Backend for the model graph. CUDA backward does not fall back to CPU.
+    /// Backend for the model graph. CUDA does not fall back to CPU.
     #[arg(long, value_enum, default_value = "cpu")]
     backend: Backend,
     #[arg(long, env = "LANTERNFISH_THREADS", default_value_t = super::default_threads())]
@@ -165,9 +165,11 @@ impl Engine {
         let mut output = vec![1; tokens.len()];
         let mut batch = unsafe { ffi::llama_batch_get_one(input.as_mut_ptr(), input.len() as i32) };
         batch.logits = output.as_mut_ptr();
+        let status = unsafe { ffi::llama_decode(ctx.0, batch) };
         ensure!(
-            unsafe { ffi::llama_decode(ctx.0, batch) } == 0,
-            "edit forward failed"
+            status == 0,
+            "edit forward failed on {} (status {status}); use --verbose for the llama.cpp error",
+            self.device.name()
         );
         let ptr = unsafe { ffi::llama_get_logits_ith(ctx.0, -1) };
         ensure!(!ptr.is_null(), "missing edit logits");
@@ -456,8 +458,9 @@ fn read_cache(path: &Path, width: usize) -> Result<Vec<Vec<f64>>> {
 
 fn moment(e: &Engine, root: &Path, hash: &str, layer: usize) -> Result<Vec<Vec<f64>>> {
     fs::create_dir_all(root)?;
-    let backend = if e.device.is_cuda() { "cuda-" } else { "" };
-    let file = root.join(format!("v1-{backend}{hash}-{SAMPLE_SHA}-{layer}.f32"));
+    // Do not reuse samples made before strict CUDA forward placement.
+    let version = if e.device.is_cuda() { "v2-cuda" } else { "v1" };
+    let file = root.join(format!("{version}-{hash}-{SAMPLE_SHA}-{layer}.f32"));
     if file.exists() {
         return read_cache(&file, e.cols);
     }
@@ -482,7 +485,7 @@ fn moment(e: &Engine, root: &Path, hash: &str, layer: usize) -> Result<Vec<Vec<f
         .filter(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            name.starts_with("v1-")
+            (name.starts_with("v1-") || name.starts_with("v2-cuda-"))
                 && name.ends_with(".f32")
                 && e.file_type().is_ok_and(|ty| ty.is_file())
                 && e.path() != file

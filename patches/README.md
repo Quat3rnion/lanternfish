@@ -30,8 +30,12 @@ sh patches/apply-llama.sh /path/to/llama.cpp
    cuBLAS already honors this setting.
 6. `0006-admit-single-device-backward.patch`: Permit one fully offloaded
    CUDA or ROCm device for gradient and residual backward. Reject a CPU
-   fallback for backward computation. The forward embedding lookup can
-   still run on the CPU.
+   fallback for backward computation.
+7. `0007-audit-complete-gpu-graphs.patch`: Check all active compute nodes
+   before dispatch, including the forward prefix and ordinary edit decode.
+   Lanternfish puts the input embeddings on the selected CUDA device.
+8. `0008-adapt-rdna3-bf16-wmma-operands.patch`: Preserve the BF16 operand
+   bits for RDNA3 WMMA with both the `short` and `__bf16` compiler signatures.
 
 Build Lanternfish with headers and shared libraries from the **same** patched
 checkout. The gradient call adds a public symbol. An unpatched library cannot

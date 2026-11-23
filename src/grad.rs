@@ -22,7 +22,7 @@ pub(crate) struct Args {
     target_token: i32,
     #[arg(long)]
     out: PathBuf,
-    /// Backend for the model graph. CUDA backward does not fall back to CPU.
+    /// Backend for the model graph. CUDA does not fall back to CPU.
     #[arg(long, value_enum, default_value = "cpu")]
     backend: Backend,
     #[arg(long, env = "LANTERNFISH_THREADS", default_value_t = super::default_threads())]

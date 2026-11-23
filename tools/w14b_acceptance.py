@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 from statistics import median
 import subprocess
 import sys
@@ -25,6 +26,9 @@ MODEL = Path("/arboretum/w14b/qwen-f32.gguf")
 MODEL_HASH = "8df5d93dbefb5f73ce905c6e464aaa312756fab7a8a85ee1f7dae15cec36bfde"
 GRAD_ATOL = 1e-5
 GRAD_RTOL = 2e-3
+GRAD_REL_LINF = 1e-3
+FP64_ATOL = 1e-5
+FP64_OPERAND_SET = "qwen-layer-23.out_proj"
 LOSS_ATOL = 5e-5
 FD_ATOL = 3e-4
 FD_STEP = 0.003
@@ -35,6 +39,12 @@ ROME_REQUEST = {
 }
 QWEN_PROMPT = "Apple A5 was created by"
 QWEN_TARGET = 5085  # Qwen2.5 token ID for " Google".
+HELD_OUT = (("paris", "The capital of France is", 12095),
+            ("zero", "Water freezes at", 7168))
+PLACEMENT_MARKER = re.compile(
+    r"lanternfish_placement: graph=(forward|backward) device=(\S+) "
+    r"compute_ops=(\d+) cpu_compute_ops=(\d+)"
+)
 
 
 def compare(reference, actual, *, atol, rtol):
@@ -81,6 +91,29 @@ def load_json(path):
     return json.loads(path.read_text())
 
 
+def fp64_oracle(path, pin, identity):
+    """Verify a pinned same-operand projection oracle for this runtime and run."""
+    payload = path.read_bytes()
+    actual = hashlib.sha256(payload).hexdigest()
+    require(actual == pin, "FP64 oracle hash mismatch")
+    doc = json.loads(payload)
+    require(isinstance(doc, dict) and doc.get("schema_version") == 1,
+            "invalid FP64 oracle schema")
+    for key, expected in identity.items():
+        require(doc.get(key) == expected, f"FP64 oracle {key} does not match this run")
+    rows = doc.get("cases")
+    require(isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict)
+            and rows[0].get("operand_set") == FP64_OPERAND_SET,
+            f"expected FP64 operand set {FP64_OPERAND_SET}")
+    case = rows[0]
+    cpu, cuda = case.get("cpu_max_abs_error"), case.get("cuda_max_abs_error")
+    require(all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in (cpu, cuda)),
+            "FP64 oracle errors must be finite and nonnegative")
+    passed = cuda <= min(cpu, FP64_ATOL)
+    return {"path": str(path), "sha256": actual, "passed": passed, **identity,
+            "cases": [dict(case, passed=passed)]}
+
+
 def check_backend(doc, backend):
     provenance = doc["provenance"]
     require(provenance["backend"] == backend and provenance["device"],
@@ -88,10 +121,36 @@ def check_backend(doc, backend):
     return provenance
 
 
-def run_cli(args, label, command, *options, audit=False):
+def placement(log, device, required):
+    """Count native pre-dispatch audits, not scheduler reserve plans."""
+    graphs = {}
+    for line in log.splitlines():
+        if not line.startswith("lanternfish_placement:"):
+            continue
+        marker = PLACEMENT_MARKER.fullmatch(line)
+        require(marker is not None, f"invalid placement marker: {line}")
+        kind, assigned, ops, cpu_ops = marker.groups()
+        require(assigned == device and int(ops) > 0 and int(cpu_ops) == 0,
+                f"non-GPU compute assignment: {line}")
+        tally = graphs.setdefault(kind, {"graphs": 0, "compute_ops": 0, "cpu_compute_ops": 0})
+        tally["graphs"] += 1
+        tally["compute_ops"] += int(ops)
+    require(required <= graphs.keys(), f"missing dispatch audit for {sorted(required - graphs.keys())}")
+    return graphs
+
+
+def audit_log(evidence, label, device, required):
+    log = evidence / f"{label}.log"
+    try:
+        return placement(log.read_text(), device, required)
+    except ValueError as err:
+        raise ValueError(f"{label}: {err}; see {log}") from err
+
+
+def run_cli(args, label, command, *options, audit=False, scheduler_debug=False):
     env = dict(os.environ)
     env.pop("GGML_SCHED_DEBUG", None)
-    if audit:
+    if scheduler_debug:
         env["GGML_SCHED_DEBUG"] = "2"
     if args.cpu_only:
         env["CUDA_VISIBLE_DEVICES"] = ""
@@ -122,7 +181,9 @@ def gradient(args, work, label, model, prompt, target, layer, shape, backend):
             and doc["objective"] == "next_token_cross_entropy"
             and doc["position"] == len(doc["tokens"]) - 1 and math.isfinite(doc["loss"]),
             f"{label}: invalid gradient manifest")
-    check_backend(doc, backend)
+    provenance = check_backend(doc, backend)
+    if backend == "cuda":
+        doc["placement"] = audit_log(args.evidence, label, provenance["device"], {"backward"})
     tensor = doc["tensor"]
     tensor_file = out / tensor["file"]
     payload = tensor_file.read_bytes()
@@ -143,11 +204,19 @@ def compare_gradients(cpu, cuda):
     cpu_doc, cpu_grad = cpu
     cuda_doc, cuda_grad = cuda
     require(cpu_doc["tokens"] == cuda_doc["tokens"], "gradient tokenization mismatch")
+    return gradient_parity(cpu_grad, cuda_grad, cpu_doc["loss"], cuda_doc["loss"])
+
+
+def gradient_parity(cpu_grad, cuda_grad, cpu_loss, cuda_loss):
     stats = compare(cpu_grad, cuda_grad, atol=GRAD_ATOL, rtol=GRAD_RTOL)
-    loss_error = abs(cpu_doc["loss"] - cuda_doc["loss"])
-    return {**stats, "cpu_loss": cpu_doc["loss"], "cuda_loss": cuda_doc["loss"],
+    loss_error = abs(cpu_loss - cuda_loss)
+    relative = stats["relative_linf_error"]
+    pointwise = stats.pop("passed")
+    return {**stats, "cpu_loss": cpu_loss, "cuda_loss": cuda_loss,
             "absolute_loss_error": loss_error,
-            "passed": stats["passed"] and loss_error <= LOSS_ATOL}
+            "pointwise_passed": pointwise,
+            "relative_linf_passed": relative is not None and relative <= GRAD_REL_LINF,
+            "loss_passed": loss_error <= LOSS_ATOL}
 
 
 def finite_differences(args, work, layer, grads):
@@ -192,14 +261,14 @@ def finite_differences(args, work, layer, grads):
     return rows
 
 
-def time_edit(args, work, backend, repeat):
+def time_edit(args, work, backend, repeat, *, audit=False):
     request = args.evidence / "rome-request.json"
     request.write_text(json.dumps(ROME_REQUEST, indent=2) + "\n")
     label = f"rome-{backend}-{repeat}"
     out = args.evidence / f"{label}.json"
     seconds = run_cli(args, label, "locate-edit", "--model", MODEL,
                       "--request", request, "--out", out,
-                      "--cache", work / f"cache-{label}", "--backend", backend)
+                      "--cache", work / f"cache-{label}", "--backend", backend, audit=audit)
     doc = load_json(out)
     provenance = check_backend(doc, backend)
     require(doc["method"] == "rome" and doc["model_sha256"] == MODEL_HASH
@@ -212,9 +281,13 @@ def time_edit(args, work, backend, repeat):
             and all(map(math.isfinite, key + value)) and any(key) and any(value),
             f"ROME {backend}: invalid rank-one factors")
     (before, after), = doc["losses"]
-    return {"seconds": seconds, "provenance": provenance, "nll_before": before,
-            "nll_after": after, "output_sha256": digest(out),
-            "passed": math.isfinite(before) and math.isfinite(after) and after < before}
+    result = {"seconds": seconds, "provenance": provenance, "nll_before": before,
+              "nll_after": after, "output_sha256": digest(out),
+              "passed": math.isfinite(before) and math.isfinite(after) and after < before}
+    if audit:
+        result["placement"] = audit_log(args.evidence, label, provenance["device"],
+                                        {"forward", "backward"})
+    return result
 
 
 def main():
@@ -223,33 +296,49 @@ def main():
     parser.add_argument("--evidence", type=Path, required=True, help="A new evidence directory")
     parser.add_argument("--threads", type=int, default=6)
     parser.add_argument("--cpu-only", action="store_true", help="Check the CPU reference only")
+    parser.add_argument("--oracle", type=Path, help="Pinned FP64 projection evidence JSON")
+    parser.add_argument("--oracle-sha256", help="Required SHA-256 of the FP64 evidence JSON")
     args = parser.parse_args()
     args.binary = args.binary.resolve(strict=True)
     args.evidence.mkdir(parents=True, exist_ok=False)
     backends = ("cpu",) if args.cpu_only else ("cpu", "cuda")
+    held_out_names = {name for name, _, _ in HELD_OUT}
     report = {
         "qualification": "not release-qualified",
+        "check_mode": "cpu_reference" if args.cpu_only else "cuda_acceptance",
         "backends": backends,
         "binary": str(args.binary), "binary_sha256": digest(args.binary),
         "threads": args.threads, "model": str(MODEL), "model_sha256": digest(MODEL),
         "inherited_cuda_precision": {k: os.environ.get(k) for k in
                                      ("NVIDIA_TF32_OVERRIDE", "GGML_CUDA_CUBLAS_COMPUTE_TYPE")},
-        "tolerance": {"gradient_absolute": GRAD_ATOL, "gradient_relative": GRAD_RTOL,
+        "tolerance": {"pointwise_diagnostic_atol": GRAD_ATOL,
+                      "pointwise_diagnostic_rtol": GRAD_RTOL,
+                      "gradient_relative_linf": GRAD_REL_LINF,
+                      "fp64_absolute": FP64_ATOL,
                       "loss_absolute": LOSS_ATOL, "finite_difference_absolute": FD_ATOL,
                       "finite_difference_step": FD_STEP},
         "qwen_prompt": QWEN_PROMPT, "qwen_target_token": QWEN_TARGET,
         "gradients": {}, "finite_differences": {}, "rome": {}, "passed": False,
+        "fp64_oracle": {"status": "not run (CPU reference only)"} if args.cpu_only
+                       else {"passed": False},
     }
     checks = []
     try:
         require(report["model_sha256"] == MODEL_HASH, "Qwen F32 reference hash mismatch")
+        if "cuda" in backends:
+            require(args.oracle is not None and args.oracle_sha256 is not None,
+                    "CUDA acceptance requires --oracle and --oracle-sha256")
+            require(args.oracle.is_file(), f"FP64 oracle does not exist: {args.oracle}")
         with tempfile.TemporaryDirectory(prefix="w14b-", dir="/arboretum/tmp") as directory:
             work = Path(directory)
             tiny = work / "tiny.gguf"
             write_model(tiny, "f32", "qwen2")
             report["tiny_model_sha256"] = digest(tiny)
-            suites = (("tiny", tiny, "abc", 6, (0, 1), [32, 64]),
-                      ("qwen", MODEL, QWEN_PROMPT, QWEN_TARGET, QWEN_LAYERS, [896, 4864]))
+            suites = [("tiny", tiny, "abc", 6, (0, 1), [32, 64]),
+                      ("qwen", MODEL, QWEN_PROMPT, QWEN_TARGET, QWEN_LAYERS, [896, 4864])]
+            if "cuda" in backends:
+                suites.extend((name, MODEL, prompt, target, QWEN_LAYERS, [896, 4864])
+                              for name, prompt, target in HELD_OUT)
             for name, model, prompt, target, layers, shape in suites:
                 for layer in layers:
                     label = f"{name}-{layer}"
@@ -258,15 +347,29 @@ def main():
                         for b in backends
                     }
                     row = {b: {"loss": doc["loss"], "tensor_sha256": doc["tensor"]["sha256"],
-                               "provenance": doc["provenance"]} for b, (doc, _) in grads.items()}
+                                "provenance": doc["provenance"]} for b, (doc, _) in grads.items()}
+                    row.update(prompt=prompt, target_token=target, held_out=name in held_out_names)
                     if "cuda" in grads:
-                        row["parity"] = compare_gradients(grads["cpu"], grads["cuda"])
-                        checks.append(row["parity"]["passed"])
+                        parity = compare_gradients(grads["cpu"], grads["cuda"])
+                        row["parity"] = parity
+                        row["cuda"]["placement"] = grads["cuda"][0]["placement"]
+                        checks.append(parity["loss_passed"])
+                        if row["held_out"]:
+                            checks.append(parity["relative_linf_passed"])
                     report["gradients"][label] = row
                     if name == "tiny":
                         fd = finite_differences(args, work, layer, grads)
                         report["finite_differences"][label] = fd
                         checks.extend(row["passed"] for row in fd)
+            if "cuda" in backends:
+                oracle = fp64_oracle(args.oracle, args.oracle_sha256, {
+                    "binary_sha256": report["binary_sha256"],
+                    "model_sha256": report["model_sha256"],
+                    "gradient_sha256": {b: report["gradients"]["qwen-23"][b]["tensor_sha256"]
+                                        for b in backends},
+                })
+                report["fp64_oracle"] = oracle
+                checks.append(oracle["passed"])
             samples = {b: [] for b in backends}
             for repeat in range(4):
                 # Repeat 0 warms the file/system caches. Each invocation starts
@@ -285,6 +388,10 @@ def main():
             if "cuda" in backends:
                 report["rome"]["cpu_over_cuda_speedup"] = (
                     report["rome"]["cpu"]["median_seconds"] / report["rome"]["cuda"]["median_seconds"])
+                audited = time_edit(args, work, "cuda", "placement", audit=True)
+                audited.pop("seconds")  # Verbose logging is not in the timed samples.
+                report["rome"]["placement_run"] = audited
+                checks.append(audited["passed"])
             require(digest(MODEL) == MODEL_HASH, "Qwen F32 reference changed during acceptance")
             report["passed"] = all(checks)
     except (KeyError, OSError, ValueError, subprocess.SubprocessError) as err:

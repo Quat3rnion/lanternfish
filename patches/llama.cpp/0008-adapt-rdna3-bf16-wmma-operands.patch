@@ -1,0 +1,29 @@
+diff --git a/ggml/src/ggml-cuda/mma.cuh b/ggml/src/ggml-cuda/mma.cuh
+index 1cec98b..52f64d0 100644
+--- a/ggml/src/ggml-cuda/mma.cuh
++++ b/ggml/src/ggml-cuda/mma.cuh
+@@ -1404,6 +1404,15 @@ namespace ggml_cuda_mma {
+ #endif // TURING_MMA_AVAILABLE
+     }
+ 
++#if defined(AMD_WMMA_AVAILABLE) && defined(RDNA3)
++    // Clang variants take short or __bf16 lanes. Pass the BF16 bits unchanged.
++    struct wmma_bf16_operand {
++        __attribute__((ext_vector_type(16))) typedef __bf16 lanes;
++        lanes bits;
++        template<typename T> __device__ operator T() const { return __builtin_bit_cast(T, bits); }
++    };
++#endif
++
+     template <data_layout dl_ab, data_layout dl_d>
+     static __device__ __forceinline__ void mma(
+             tile<16, 16, float, dl_d> & D, const tile<16, 8, nv_bfloat162, dl_ab> & A, const tile<16, 8, nv_bfloat162, dl_ab> & B) {
+@@ -1421,7 +1430,7 @@ namespace ggml_cuda_mma {
+         floatx8_t& acc_frag = reinterpret_cast<floatx8_t&>(D.x[0]);
+         const bf16x16_t& a_frag = reinterpret_cast<const bf16x16_t&>(A.x[0]);
+         const bf16x16_t& b_frag = reinterpret_cast<const bf16x16_t&>(B.x[0]);
+-        acc_frag = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a_frag, b_frag, acc_frag);
++        acc_frag = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(wmma_bf16_operand{a_frag}, wmma_bf16_operand{b_frag}, acc_frag);
+ #else
+         GGML_UNUSED_VARS(D, A, B);
+         NO_DEVICE_CODE;

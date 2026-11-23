@@ -120,7 +120,8 @@ instead of the inference KV cache. It propagates through subsequent attention
 and FFN blocks. It does not run an optimizer or update the model.
 The default backend is `cpu`. Use `--backend cuda` to select the first visible
 CUDA device. The command fails if no CUDA device is available or if a
-backward operation cannot run on that device.
+forward or backward graph operation cannot run on that device. Data transfers
+between the host and the device are allowed.
 
 `grad-1/manifest.json` has `schema_version: 1` and `kind: "gradient"`. It
 records `model`, `tokens` (an array of token IDs in order), `position`,

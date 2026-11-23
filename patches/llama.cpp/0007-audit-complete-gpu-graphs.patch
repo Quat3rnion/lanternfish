@@ -1,0 +1,108 @@
+diff --git a/include/llama.h b/include/llama.h
+index 92f2a96..7efe014 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -409,6 +409,7 @@ extern "C" {
+         bool offload_kqv; // offload the KQV ops (including the KV cache) to GPU
+         bool no_perf;     // measure performance timings
+         bool op_offload;  // offload host tensor operations to device
++        bool lanternfish_gpu_only; // require every model graph computation on the selected GPU
+         bool swa_full;    // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
+                           // NOTE: setting to false when n_seq_max > 1 can cause bad performance in some cases
+                           //       ref: https://github.com/ggml-org/llama.cpp/pull/13845#issuecomment-2924800573
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index bea077e..d3d8ae5 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -367,6 +367,7 @@ llama_context::llama_context(
+     }
+ 
+     cparams.op_offload     = params.op_offload;
++    cparams.lanternfish_gpu_only = params.lanternfish_gpu_only;
+     cparams.kv_unified     = params.kv_unified;
+     cparams.moe_cache_size = params.moe_cache_size;
+ 
+@@ -454,6 +455,10 @@ llama_context::llama_context(
+             throw std::runtime_error("failed to initialize CPU backend");
+         }
+         backends.emplace_back(backend_cpu);
++        if (cparams.lanternfish_gpu_only && (model.devices.size() != 1 || backends.size() != 2 ||
++                !cparams.offload_kqv || model.n_gpu_layers() <= model.hparams.n_layer_all)) {
++            throw std::runtime_error("strict placement needs one fully offloaded model device");
++        }
+ 
+         // create a list of the set_n_threads functions in the backends
+         for (auto & backend : backends) {
+@@ -2747,6 +2752,26 @@ void llama_context::sched_graph_realloc(ggml_backend_sched_t sched, ggml_cgraph
+ ggml_status llama_context::graph_compute(
+             ggml_cgraph * gf,
+                    bool   batched) {
++    if (cparams.lanternfish_gpu_only) {
++        auto * expected = backends.front().get();
++        int count = 0;
++        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
++            auto * node = ggml_graph_node(gf, i);
++            if (!(node->flags & GGML_TENSOR_FLAG_COMPUTE) || node->op == GGML_OP_NONE ||
++                    node->op == GGML_OP_VIEW || node->op == GGML_OP_RESHAPE ||
++                    node->op == GGML_OP_PERMUTE || node->op == GGML_OP_TRANSPOSE) {
++                continue;
++            }
++            if (ggml_backend_sched_get_tensor_backend(sched.get(), node) != expected) {
++                LLAMA_LOG_ERROR("%s: %s (%s) was not placed on %s\n", __func__,
++                        node->name, ggml_op_desc(node), ggml_backend_name(expected));
++                return GGML_STATUS_FAILED;
++            }
++            ++count;
++        }
++        LLAMA_LOG_DEBUG("lanternfish_placement: graph=%s device=%s compute_ops=%d cpu_compute_ops=0\n",
++                cparams.training ? "backward" : "forward", ggml_backend_name(expected), count);
++    }
+     int n_threads        = batched ? cparams.n_threads_batch : cparams.n_threads;
+     ggml_threadpool_t tp = batched ? threadpool_batch        : threadpool;
+ 
+@@ -3854,7 +3879,6 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+     const auto flags = param->flags;
+     ggml_set_param(param);
+     ggml_build_forward_expand(graph, loss);
+-    const int n_forward = ggml_graph_n_nodes(graph);
+     ggml_build_backward_expand(meta.get(), graph, nullptr);
+     param->flags = flags;
+     auto * grad = ggml_graph_get_grad(graph, param);
+@@ -3866,16 +3890,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+     if (!ggml_backend_sched_alloc_graph(sched.get(), graph)) {
+         throw std::runtime_error("could not allocate gradient graph");
+     }
+-    if (gpu) {
+-        for (int i = n_forward; i < ggml_graph_n_nodes(graph); ++i) {
+-            auto * node = ggml_graph_node(graph, i);
+-            if (node->op != GGML_OP_NONE && node->op != GGML_OP_VIEW && node->op != GGML_OP_RESHAPE &&
+-                    node->op != GGML_OP_PERMUTE && node->op != GGML_OP_TRANSPOSE &&
+-                    ggml_backend_sched_get_tensor_backend(sched.get(), node) != backends.front().get()) {
+-                throw std::runtime_error(format("gradient operation %s was not placed on the GPU", ggml_op_desc(node)));
+-            }
+-        }
+-    }
++    cparams.lanternfish_gpu_only = gpu;
+     res.set_inputs(&ubatch);
+     if (residual) {
+         std::vector<float> mask(count, 0.0f);
+@@ -4173,6 +4188,7 @@ llama_context_params llama_context_default_params() {
+         /*.offload_kqv                 =*/ true,
+         /*.no_perf                     =*/ true,
+         /*.op_offload                  =*/ true,
++        /*.lanternfish_gpu_only        =*/ false,
+         /*.swa_full                    =*/ true,
+         /*.kv_unified                  =*/ false,
+         /*.sampler                     =*/ nullptr,
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index d7203d9..90a5dd7 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -53,6 +53,7 @@ struct llama_cparams {
+     bool no_perf;
+     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
+     bool op_offload;
++    bool lanternfish_gpu_only;
+     bool kv_unified;
+     bool pipeline_parallel;
+     bool training;           // set by llama_opt_init()
