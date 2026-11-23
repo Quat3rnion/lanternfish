@@ -7,6 +7,7 @@ mod edit_solve;
 mod ffi;
 mod gguf;
 mod grad;
+mod grad_corpus;
 mod grad_select;
 mod jobs;
 mod model;
@@ -50,6 +51,8 @@ enum Cmd {
     Grad(grad::Args),
     /// Export the next-token loss gradient at a weight or activation site.
     GradSelect(grad_select::Args),
+    /// Export selected weight gradients of token-weighted mean corpus NLL.
+    GradCorpus(grad_corpus::Args),
     /// Encode raw text with model special tokens. Do not apply a chat template.
     Tokenize {
         #[arg(long)]
@@ -136,6 +139,7 @@ fn main() -> Result<()> {
         Cmd::Trace(args) => return trace::run(args),
         Cmd::Grad(args) => return grad::run(args),
         Cmd::GradSelect(args) => return grad_select::run(args),
+        Cmd::GradCorpus(args) => return grad_corpus::run(args),
         Cmd::Tokenize { model, text } => return grad_select::tokenize(&model, &text),
         Cmd::LocateEdit(args) => return edit::run(args),
         cmd => cmd,
@@ -145,6 +149,7 @@ fn main() -> Result<()> {
         Cmd::Trace(_)
         | Cmd::Grad(_)
         | Cmd::GradSelect(_)
+        | Cmd::GradCorpus(_)
         | Cmd::Tokenize { .. }
         | Cmd::LocateEdit(_) => unreachable!(),
         Cmd::Probe {

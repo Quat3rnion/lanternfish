@@ -24,7 +24,7 @@ def build(args):
     builddir = args.llama / "build"
     source = args.llama / "src/llama-context.cpp"
     text = source.read_text()
-    a = "    ggml_set_output(grad);"
+    a = "    if (!ggml_backend_sched_alloc_graph(sched.get(), graph)) {"
     b = "    ggml_backend_tensor_get(grad, grad_out, 0, ggml_nbytes(grad));"
     assert text.count(a) == text.count(b) == 1
     text = text.replace(a, """

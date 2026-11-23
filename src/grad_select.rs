@@ -83,14 +83,14 @@ enum Role {
 }
 
 // Only constructed for a file in a newly created, exclusive output directory.
-struct Temporary(PathBuf);
+pub(crate) struct Temporary(pub(crate) PathBuf);
 impl Drop for Temporary {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
 }
 
-fn expand(source: &Path, dest: &Path, threads: i32) -> Result<()> {
+pub(crate) fn expand(source: &Path, dest: &Path, threads: i32) -> Result<()> {
     let a = CString::new(source.as_os_str().as_encoded_bytes())?;
     let b = CString::new(dest.as_os_str().as_encoded_bytes())?;
     let mut p = unsafe { ffi::llama_model_quantize_default_params() };
