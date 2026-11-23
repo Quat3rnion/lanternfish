@@ -64,8 +64,11 @@ lanternfish trace --model model.gguf --prompt "The capital of France is" \
   --spec spec.json --intervention edit.json --out trace-edit
 ```
 
-Use `add` or `replace` with a `vector` array of finite numbers, one per hidden
-dimension. `scale` multiplies the row by a finite `factor`. `zero` sets all
+Use `add`, `replace`, `project_out`, or `subtract` with a `vector` array of
+finite numbers, one per hidden dimension. `project_out` removes the component
+of the row along the nonzero vector. The vector does not have to be a unit
+vector. `subtract` subtracts the vector multiplied by the finite, nonnegative
+`scale`. The `scale` operation multiplies the row by a finite `factor`. `zero` sets all
 values in the row to zero. `kq_soft_max` is read-only. Rules can target rows
 outside the capture spec. Two rules cannot edit the same layer, role, and
 position. The command fails if it cannot apply any requested edit.

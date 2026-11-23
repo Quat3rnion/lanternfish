@@ -160,6 +160,30 @@ class TraceTests(unittest.TestCase):
                     self.assertAlmostEqual(sum(after["kq_soft_max", 0][head*keys:(head+1)*keys]), 1)
                     self.assertEqual(after["kq_soft_max", 0][head*keys + 1], 0)
 
+    def test_direction_interventions_on_selected_qwen2_rows(self):
+        self.spec.update(layers=[1], positions=[0, 1, 2], byte_cap=8192)
+        direction = [2.0, -1.0] + [0.0] * 30
+        base = self.trace("bf16", "base", arch="qwen2")
+        common = {"layer": 1, "role": "l_out", "vector": direction}
+        edit = self.trace("bf16", "edit", arch="qwen2", rules=[
+            dict(common, positions=[0], op="project_out"),
+            dict(common, positions=[2], op="subtract", scale=0.25),
+        ])
+        before = [self.tensor(entry, "base") for entry in base["tensors"]]
+        after = [self.tensor(entry, "edit") for entry in edit["tensors"]]
+        self.assertGreater(abs(2 * before[0][0] - before[0][1]), 1e-5)
+        self.assertAlmostEqual(2 * after[0][0] - after[0][1], 0, places=6)
+        self.assertAlmostEqual(after[0][0] + 2 * after[0][1],
+                               before[0][0] + 2 * before[0][1], places=6)
+        self.assertEqual(after[0][2:], before[0][2:])
+        self.assertEqual(after[1], before[1])
+        for observed, original, d in zip(after[2], before[2], direction):
+            self.assertAlmostEqual(observed, original - 0.25 * d, places=6)
+        self.assertNotEqual(edit["model_logits"], base["model_logits"])
+        self.assertIn("nonzero", self.trace("bf16", "invalid", arch="qwen2", check=False,
+                                            rules=[dict(common, positions=[0], op="project_out",
+                                                        vector=[0.0] * 32)]))
+
     def test_byte_cap_includes_manifest_and_tensors(self):
         self.spec["byte_cap"] = 256  # the two residuals fit, the manifest does not
         self.assertIn("byte_cap", self.trace("f32", check=False))
