@@ -1,5 +1,6 @@
 //! lanternfish: trace and visualize how a llama.cpp model routes each token
 //! through its layers and experts, in prefill and in decoding.
+mod backward_backend;
 mod capture;
 mod edit;
 mod edit_solve;
@@ -44,9 +45,9 @@ struct Cli {
 enum Cmd {
     /// Export selected prompt activations and logits to a new directory.
     Trace(trace::Args),
-    /// Export a CPU next-token gradient for a selected FFN down weight.
+    /// Export a next-token gradient for a selected FFN down weight.
     Grad(grad::Args),
-    /// Compute CPU ROME, MEMIT or AlphaEdit low-rank factors without writing source weights.
+    /// Compute ROME, MEMIT or AlphaEdit low-rank factors without writing source weights.
     LocateEdit(edit::Args),
     /// Run one small forward pass and show which graph nodes fill each role.
     Probe {

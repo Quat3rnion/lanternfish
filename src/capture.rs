@@ -285,7 +285,7 @@ impl Drop for Llama {
 
 /// Load ggml backends. Builds with GGML_BACKEND_DL keep the CPU backend in a
 /// plugin; LANTERNFISH_BACKEND_DIR points at it (set in the Docker image).
-fn init_backends() {
+pub(crate) fn init_backends() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
         match std::env::var("LANTERNFISH_BACKEND_DIR") {
@@ -304,25 +304,21 @@ fn load(path: &Path) -> Result<*mut ffi::llama_model> {
 }
 
 pub(crate) fn load_model(path: &Path, cpu_only: bool) -> Result<*mut ffi::llama_model> {
-    load_model_with_mapping(path, cpu_only, true)
-}
-
-pub(crate) fn load_model_with_mapping(
-    path: &Path,
-    cpu_only: bool,
-    mmap: bool,
-) -> Result<*mut ffi::llama_model> {
     init_backends();
     let mut mp = unsafe { ffi::llama_model_default_params() };
     mp.n_gpu_layers = 0;
-    if !mmap {
-        mp.load_mode = ffi::llama_load_mode_LLAMA_LOAD_MODE_NONE;
-    }
     let mut devices = [std::ptr::null_mut()];
     if cpu_only {
         mp.devices = devices.as_mut_ptr();
         mp.use_extra_bufts = false;
     }
+    load_model_with_params(path, mp)
+}
+
+pub(crate) fn load_model_with_params(
+    path: &Path,
+    mp: ffi::llama_model_params,
+) -> Result<*mut ffi::llama_model> {
     let c = CString::new(path.to_string_lossy().as_bytes())?;
     let m = unsafe { ffi::llama_model_load_from_file(c.as_ptr(), mp) };
     if m.is_null() {

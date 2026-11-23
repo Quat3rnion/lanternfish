@@ -1,8 +1,16 @@
-# CPU locate-then-edit
+# Locate-then-edit
 
 Use `lanternfish locate-edit --model MODEL.gguf --request request.json
---cache PRIVATE_DIR --out factors.json --threads 8`. The command does not
-write to `MODEL.gguf`. It returns low-rank factors for `blk.N.ffn_down.weight`.
+--cache PRIVATE_DIR --out factors.json --threads 8 --backend cpu`. The command
+does not write to `MODEL.gguf`. It returns low-rank factors for
+`blk.N.ffn_down.weight`.
+
+The default backend for gradients is `cpu`. Use `--backend cuda` to select
+the first visible CUDA device. The command fails if the device is not
+available or a backward operation cannot run on it. The JSON output records
+the backend and ggml device name in `provenance`. The factor solve stays on
+the CPU.
+
 The request uses this format:
 
 ```json
@@ -24,7 +32,8 @@ fixed corpus, divided by the square root of the token count. The corpus
 `data/edit-moment.txt` is original project text under Apache-2.0; it does not
 contain evaluation data. SHA-256:
 `21ffd89a9f728b1b760433afd385852589cf5012aac10336ac33b2ad23609877`.
-The private cache stores the factors by model SHA-256, corpus SHA-256 and layer.
+The private cache stores the sampled keys by backend, model SHA-256, corpus
+SHA-256 and layer.
 
 Patch `0003` extends the W0 F32 backward graph to optimize a displacement at
 the subject position. It uses full teacher-forced target cross entropy, a
@@ -51,7 +60,7 @@ displacement gives `z*` for MEMIT and AlphaEdit.
 The implementation uses Woodbury with a small F64 Gram solve. The ridge
 uses the mean diagonal of `C` with a positive floor (ROME uses 1% of that
 scale). For a BF16 GGUF, the CLI expands weights to F32 in a temporary file
-and loads a private writable CPU copy. The CLI removes the temporary file
+and loads a private writable copy. The CLI removes the temporary file
 after load. It rounds each intermediate multi-layer update once to BF16
 before the next layer's forward pass. F32 source GGUF uses an F32 private
 copy. Quantized edit inputs are not supported.

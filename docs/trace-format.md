@@ -109,7 +109,7 @@ length equals the number of prompt tokens.
 
 ```sh
 lanternfish grad --model model-f32.gguf --prompt "The capital of France is" \
-  --layer 0 --target-token 123 --out grad-1
+  --layer 0 --target-token 123 --out grad-1 --backend cpu
 ```
 
 Replace `123` with the model vocabulary ID of the target token. The loss
@@ -118,11 +118,15 @@ is the negative log probability of that token at the last prompt position.
 model. The backward graph uses the original layer stack, with direct K/V
 instead of the inference KV cache. It propagates through subsequent attention
 and FFN blocks. It does not run an optimizer or update the model.
+The default backend is `cpu`. Use `--backend cuda` to select the first visible
+CUDA device. The command fails if no CUDA device is available or if a
+backward operation cannot run on that device.
 
 `grad-1/manifest.json` has `schema_version: 1` and `kind: "gradient"`. It
 records `model`, `tokens` (an array of token IDs in order), `position`,
 `target_token`, `objective` (`"next_token_cross_entropy"`), `loss`, `layer`,
-`weight` (the GGUF tensor name), and `tensor` (the payload descriptor).
+`weight` (the GGUF tensor name), `tensor` (the payload descriptor), and
+`provenance` (`backend` and the ggml `device` name).
 `gradient.f32` has shape `[hidden, ffn_width]`, with the input dimension
 varying fastest, like the corresponding GGUF weight.
 
@@ -140,6 +144,6 @@ varying fastest, like the corresponding GGUF weight.
 - Gradient requires all F32 model weights. It supports a dense Llama or
   Qwen2 model with ordinary causal attention, and one prompt of at most
   256 tokens (or the model's training context if smaller) in one ubatch.
-  It exports one FFN down-weight gradient per call. BF16/quantized backward,
-  activation gradients, MoE, and GPU backward are not implemented. A full
+  It exports one FFN down-weight gradient per call. It does not support
+  BF16 or quantized backward, activation gradients, or MoE. A full
   backward pass can need substantially more memory than inference.

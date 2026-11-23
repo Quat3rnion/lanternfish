@@ -1,11 +1,11 @@
-//! Read-only target-token loss and native CPU backward for a selected weight.
+//! Read-only target-token loss and native backward for a selected weight.
 use std::path::PathBuf;
 use std::ptr;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
-use crate::{capture, ffi, model::ModelFile, trace};
+use crate::{backward_backend::Backend, capture, ffi, model::ModelFile, trace};
 
 const MAX_TOKENS: usize = 256;
 
@@ -22,12 +22,16 @@ pub(crate) struct Args {
     target_token: i32,
     #[arg(long)]
     out: PathBuf,
+    /// Backend for the model graph. CUDA backward does not fall back to CPU.
+    #[arg(long, value_enum, default_value = "cpu")]
+    backend: Backend,
     #[arg(long, env = "LANTERNFISH_THREADS", default_value_t = super::default_threads())]
     threads: i32,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
     trace::check_threads(args.threads)?;
+    let device = args.backend.select()?;
     let model = ModelFile::open(&args.model)?;
     ensure!(
         matches!(model.s.arch.as_str(), "llama" | "qwen2") && model.s.n_experts == 0,
@@ -59,7 +63,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         "unexpected {name} shape"
     );
 
-    let raw = capture::load_model(&args.model, true)?;
+    let raw = device.load_model(&args.model, true)?;
     let mut ll = capture::Llama {
         model: raw,
         ctx: ptr::null_mut(),
@@ -76,9 +80,13 @@ pub(crate) fn run(args: Args) -> Result<()> {
         (0..nv).contains(&args.target_token),
         "target token outside vocabulary"
     );
-    let params = capture::cpu_context_params(tokens.len(), tokens.len(), args.threads);
+    let params = device.context_params(tokens.len(), args.threads);
     ll.ctx = unsafe { ffi::llama_init_from_model(raw, params) };
-    ensure!(!ll.ctx.is_null(), "cannot create gradient context");
+    ensure!(
+        !ll.ctx.is_null(),
+        "cannot create gradient context on {}",
+        device.name()
+    );
 
     let mut loss = 0.0;
     let mut grad = vec![0.0; n];
@@ -96,7 +104,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
     };
     ensure!(
         status == 0,
-        "native gradient failed; use --verbose for the llama.cpp error"
+        "native gradient failed on {} (status {status}); use --verbose for the llama.cpp error",
+        device.name()
     );
     ensure!(
         loss.is_finite() && grad.iter().all(|v| v.is_finite()),
@@ -115,6 +124,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         "layer": args.layer,
         "weight": name,
         "tensor": tensor,
+        "provenance": device,
     }))?;
     trace::write_export(&args.out, &manifest, &[(tensor, data)])
 }

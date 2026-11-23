@@ -16,5 +16,6 @@ if [ -n "$(git -C "$checkout" status --porcelain --untracked-files=no)" ]; then
     echo "Apply the patches to a clean llama.cpp checkout." >&2
     exit 1
 fi
-git -C "$checkout" apply --check "$patches"/llama.cpp/*.patch
+# git apply checks the series as it applies it. A separate --check cannot
+# see the lines added by earlier patches.
 git -C "$checkout" apply "$patches"/llama.cpp/*.patch

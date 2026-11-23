@@ -1,4 +1,4 @@
-//! CPU locate-then-edit against a private model copy. Emits factors, not weights.
+//! Locate-then-edit against a private model copy. Emits factors, not weights.
 use std::ffi::{CStr, CString, c_void};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -9,7 +9,12 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{capture, edit_solve, ffi, model::ModelFile, trace};
+use crate::{
+    backward_backend::{Backend, Device},
+    capture, edit_solve, ffi,
+    model::ModelFile,
+    trace,
+};
 
 const SAMPLE: &str = include_str!("../data/edit-moment.txt");
 const SAMPLE_SHA: &str = "21ffd89a9f728b1b760433afd385852589cf5012aac10336ac33b2ad23609877";
@@ -29,6 +34,9 @@ pub(crate) struct Args {
     cache: PathBuf,
     #[arg(long)]
     out: PathBuf,
+    /// Backend for the model graph. CUDA backward does not fall back to CPU.
+    #[arg(long, value_enum, default_value = "cpu")]
+    backend: Backend,
     #[arg(long, env = "LANTERNFISH_THREADS", default_value_t = super::default_threads())]
     threads: i32,
 }
@@ -120,6 +128,7 @@ unsafe extern "C" fn collect(t: *mut ffi::ggml_tensor, ask: bool, ud: *mut c_voi
 
 struct Engine {
     ll: capture::Llama,
+    device: Device,
     threads: i32,
     n_ctx: usize,
     vocab: *const ffi::llama_vocab,
@@ -136,13 +145,17 @@ impl Engine {
             "prompt exceeds {} tokens",
             self.n_ctx
         );
-        let mut params = capture::cpu_context_params(n, n, self.threads);
+        let mut params = self.device.context_params(n, self.threads);
         if let Some(state) = state {
             params.cb_eval = Some(collect);
             params.cb_eval_user_data = (state as *mut Readout).cast();
         }
         let ptr = unsafe { ffi::llama_init_from_model(self.ll.model, params) };
-        ensure!(!ptr.is_null(), "cannot create edit context");
+        ensure!(
+            !ptr.is_null(),
+            "cannot create edit context on {}",
+            self.device.name()
+        );
         Ok(ContextPtr(ptr))
     }
 
@@ -201,8 +214,13 @@ impl Engine {
             )
         };
         ensure!(
-            ret == 0 && loss.is_finite() && g.iter().all(|v| v.is_finite()),
-            "residual backward failed; use --verbose for llama.cpp details"
+            ret == 0,
+            "residual backward failed on {} (status {ret}); use --verbose for the llama.cpp error",
+            self.device.name()
+        );
+        ensure!(
+            loss.is_finite() && g.iter().all(|v| v.is_finite()),
+            "non-finite residual loss or gradient"
         );
         Ok(loss)
     }
@@ -438,7 +456,8 @@ fn read_cache(path: &Path, width: usize) -> Result<Vec<Vec<f64>>> {
 
 fn moment(e: &Engine, root: &Path, hash: &str, layer: usize) -> Result<Vec<Vec<f64>>> {
     fs::create_dir_all(root)?;
-    let file = root.join(format!("v1-{hash}-{SAMPLE_SHA}-{layer}.f32"));
+    let backend = if e.device.is_cuda() { "cuda-" } else { "" };
+    let file = root.join(format!("v1-{backend}{hash}-{SAMPLE_SHA}-{layer}.f32"));
     if file.exists() {
         return read_cache(&file, e.cols);
     }
@@ -550,6 +569,7 @@ fn solve(
 
 pub(crate) fn run(args: Args) -> Result<()> {
     trace::check_threads(args.threads)?;
+    let device = args.backend.select()?;
     ensure!(!args.out.exists(), "output already exists");
     let file = File::open(&args.request)?;
     ensure!(file.metadata()?.len() <= 65536, "edit request too large");
@@ -649,7 +669,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     } else {
         &args.model
     };
-    let model = capture::load_model_with_mapping(path, true, false)?;
+    let model = device.load_model(path, false)?;
     drop(expanded);
     let vocab = unsafe { ffi::llama_model_get_vocab(model) };
     let e = Engine {
@@ -657,6 +677,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             model,
             ctx: ptr::null_mut(),
         },
+        device,
         threads: args.threads,
         n_ctx: MAX_TOKENS.min(unsafe { ffi::llama_model_n_ctx_train(model) } as usize),
         vocab,
@@ -712,6 +733,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         "method": req.method,
         "source_dtype": if bf16 {"bf16"} else {"f32"},
         "gradient_dtype": "f32",
+        "provenance": e.device,
         "losses": losses,
         "updates": updates,
     });
