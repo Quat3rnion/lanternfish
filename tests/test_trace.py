@@ -76,6 +76,40 @@ class TraceTests(unittest.TestCase):
             self.assertEqual(lens["token_id"], actual["token_id"])
             self.assertAlmostEqual(lens["logit"], actual["logit"], places=5)
 
+    def test_moe_routes_and_expert_ablation(self):
+        roles = ["ffn_moe_logits", "ffn_moe_topk", "ffn_moe_route_weights", "l_out"]
+        self.spec.update(layers=[0], roles=roles, positions=[1, 2], byte_cap=65536)
+        for arch in ("qwen2moe", "qwen3moe"):
+            with self.subTest(arch=arch):
+                def run(out, rules=None):
+                    manifest = self.trace("f32", out, rules=rules, arch=arch)
+                    self.assertEqual(manifest["schema_version"], 1)
+                    self.assertEqual(manifest["missing"], [])
+                    self.assertEqual(manifest["logit_lens"], [])
+                    self.assertEqual(len(manifest["model_logits"]), 2)
+                    return manifest, {
+                        (row["position"], row["role"]): self.tensor(row, out)
+                        for row in manifest["tensors"]
+                    }
+
+                _, base = run(f"{arch}-base")
+                logits, ids, weights = (base[1, role] for role in roles[:3])
+                self.assertEqual(list(ids), sorted(range(len(logits)),
+                                                   key=lambda i: -logits[i])[:len(ids)])
+                self.assertEqual(len(weights), len(ids))
+                self.assertTrue(all(0 < weight <= 1 for weight in weights))
+                manifest, edit = run(f"{arch}-edit", [
+                    {"layer": 0, "role": "ffn_out", "positions": [1],
+                     "op": "zero_expert", "expert": int(ids[0])},
+                ])
+                self.assertEqual(manifest["interventions"], [
+                    {"layer": 0, "role": "ffn_out", "position": 1, "expert": int(ids[0])},
+                ])
+                for role in roles[:3]:
+                    self.assertEqual(edit[1, role], base[1, role])
+                self.assertNotEqual(edit[1, "l_out"], base[1, "l_out"])
+                self.assertEqual(edit[2, "l_out"], base[2, "l_out"])
+
     def test_legacy_run_still_writes_viz_json(self):
         model = self.work / "legacy.gguf"
         write_model(model, "f32")

@@ -40,8 +40,11 @@ sh patches/apply-llama.sh /path/to/llama.cpp
    or one activation row in the same strict graph. See the
    [selected gradient format](../docs/grad-select.md).
 10. `0010-add-target-logit-objective.patch`: Differentiate a raw final-token
-    logit with the same site, precision and placement checks. The loss API
-    and its ABI do not change.
+     logit with the same site, precision and placement checks. The loss API
+     and its ABI do not change.
+11. `0011-corpus-gradient.patch`: Accumulate gradients across a corpus.
+12. `0012-name-moe-route-weights.patch`: Name the final Qwen2MoE and Qwen3MoE
+    routing weights after normalization and scaling.
 
 The HIP runtime uses this same series. The gfx1036 pointer-batched GEMM
 workaround selects system-scope fences in the ROCm CLI process before

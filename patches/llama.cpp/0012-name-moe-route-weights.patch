@@ -1,0 +1,15 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2354,6 +2354,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(weights, "ffn_moe_weights_scaled", il);
+     }
+ 
++    // Observe the exact weights consumed by the experts, including normalization and scale.
++    if (arch == LLM_ARCH_QWEN2MOE || arch == LLM_ARCH_QWEN3MOE) {
++        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
++        cb(weights, "ffn_moe_route_weights", il);
++    }
+     //call early so that topk-moe can be used
+     ggml_build_forward_expand(gf, weights);
+ 
