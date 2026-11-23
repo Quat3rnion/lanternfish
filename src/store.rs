@@ -80,6 +80,7 @@ impl Store {
         out.into_iter().map(|x| x.1).collect()
     }
 
+    #[cfg(feature = "ui")]
     pub fn viz_path(&self, name: &str) -> Option<PathBuf> {
         let p = self.dir(name).ok()?.join("viz.json");
         p.exists().then_some(p)
@@ -87,6 +88,7 @@ impl Store {
 }
 
 /// GGUF files under the given directories (first shard only, no mmproj).
+#[cfg(feature = "ui")]
 pub fn scan_models(dirs: &[PathBuf]) -> Vec<Value> {
     fn walk(d: &Path, depth: usize, out: &mut Vec<Value>) {
         if depth > 6 {

@@ -2,10 +2,13 @@
 //! for the server. Runs are sequential because a capture uses all CPU threads
 //! and maps the whole model.
 use std::path::PathBuf;
+#[cfg(feature = "ui")]
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(feature = "ui")]
+use serde::Serialize;
 
 use crate::capture::{self, Options};
 use crate::model::ModelFile;
@@ -75,6 +78,7 @@ pub fn trace(
 }
 
 #[derive(Serialize, Clone, Debug)]
+#[cfg(feature = "ui")]
 pub struct Run {
     pub id: String,
     pub name: String,
@@ -88,11 +92,13 @@ pub struct Run {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "ui")]
 pub struct Queue {
     pub runs: Arc<Mutex<Vec<Run>>>,
     tx: mpsc::Sender<(String, RunRequest)>,
 }
 
+#[cfg(feature = "ui")]
 impl Queue {
     pub fn start(store: Store, params: TraceParams) -> Self {
         let runs: Arc<Mutex<Vec<Run>>> = Arc::default();

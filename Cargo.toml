@@ -9,19 +9,24 @@ keywords = ["llama-cpp", "interpretability", "logit-lens", "mixture-of-experts",
 license = "Apache-2.0"
 repository = "https://github.com/Quat3rnion/lanternfish"
 
+[features]
+default = ["ui"]
+ui = ["dep:axum", "dep:mime_guess", "dep:rust-embed", "dep:tokio"]
+
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", optional = true }
 clap = { version = "4", features = ["derive", "env"] }
 matrixmultiply = "0.3"
 memmap2 = "0.9"
-mime_guess = "2"
+mime_guess = { version = "2", optional = true }
 rayon = "1"
 regex = "1"
-rust-embed = "8"
+rust-embed = { version = "8", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "net"] }
+sha2 = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "fs", "net"], optional = true }
 
 [build-dependencies]
 bindgen = "0.72"

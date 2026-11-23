@@ -80,6 +80,14 @@ impl Gguf {
         }
     }
 
+    pub fn float(&self, k: &str) -> Option<f32> {
+        let id = self.key(k)?;
+        unsafe {
+            (ffi::gguf_get_kv_type(self.ctx, id) == ffi::gguf_type::GGUF_TYPE_FLOAT32)
+                .then(|| ffi::gguf_get_val_f32(self.ctx, id))
+        }
+    }
+
     pub fn tensor(&self, name: &str) -> Option<TensorInfo> {
         let c = CString::new(name).ok()?;
         let id = unsafe { ffi::gguf_find_tensor(self.ctx, c.as_ptr()) };

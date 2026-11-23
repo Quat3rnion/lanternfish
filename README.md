@@ -115,6 +115,7 @@ with the model's own output head. Details:
 | [INSTALL.md](INSTALL.md) | Installing with Docker or from source, with a check after each step |
 | [docs/USAGE.md](docs/USAGE.md) | Every command and option, the UI, the HTTP API |
 | [docs/DOCKER.md](docs/DOCKER.md) | Image details, volumes, llama.cpp version, GPU notes |
+| [docs/trace-format.md](docs/trace-format.md) | CPU trace export, activation edits, and weight gradients |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How a trace is made, and how to support a new model architecture |
 | [docs/FORMAT.md](docs/FORMAT.md) | The trace file format |
 | [web/README.md](web/README.md) | Developing the UI |

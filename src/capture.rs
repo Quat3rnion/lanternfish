@@ -265,9 +265,9 @@ pub fn split_name(name: &str) -> Option<(&str, usize)> {
     Some((base, layer.parse().ok()?))
 }
 
-struct Llama {
-    model: *mut ffi::llama_model,
-    ctx: *mut ffi::llama_context,
+pub(crate) struct Llama {
+    pub(crate) model: *mut ffi::llama_model,
+    pub(crate) ctx: *mut ffi::llama_context,
 }
 
 impl Drop for Llama {
@@ -300,9 +300,18 @@ fn init_backends() {
 }
 
 fn load(path: &Path) -> Result<*mut ffi::llama_model> {
+    load_model(path, false)
+}
+
+pub(crate) fn load_model(path: &Path, cpu_only: bool) -> Result<*mut ffi::llama_model> {
     init_backends();
     let mut mp = unsafe { ffi::llama_model_default_params() };
     mp.n_gpu_layers = 0;
+    let mut devices = [std::ptr::null_mut()];
+    if cpu_only {
+        mp.devices = devices.as_mut_ptr();
+        mp.use_extra_bufts = false;
+    }
     let c = CString::new(path.to_string_lossy().as_bytes())?;
     let m = unsafe { ffi::llama_model_load_from_file(c.as_ptr(), mp) };
     if m.is_null() {
@@ -312,6 +321,25 @@ fn load(path: &Path) -> Result<*mut ffi::llama_model> {
         );
     }
     Ok(m)
+}
+
+pub(crate) fn cpu_context_params(
+    n_ctx: usize,
+    batch: usize,
+    threads: i32,
+) -> ffi::llama_context_params {
+    let mut params = unsafe { ffi::llama_context_default_params() };
+    params.n_ctx = n_ctx as u32;
+    params.n_batch = batch as u32;
+    params.n_ubatch = batch as u32;
+    params.n_threads = threads;
+    params.n_threads_batch = threads;
+    params.op_offload = false;
+    params.offload_kqv = false;
+    params.type_k = ffi::ggml_type::GGML_TYPE_F32;
+    params.type_v = ffi::ggml_type::GGML_TYPE_F32;
+    params.flash_attn_type = ffi::llama_flash_attn_type::LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    params
 }
 
 fn context(
@@ -347,7 +375,7 @@ fn piece(vocab: *const ffi::llama_vocab, t: i32) -> String {
     String::from_utf8_lossy(&b).into_owned()
 }
 
-fn tokenize(vocab: *const ffi::llama_vocab, text: &str) -> Result<Vec<i32>> {
+pub(crate) fn tokenize(vocab: *const ffi::llama_vocab, text: &str) -> Result<Vec<i32>> {
     let mut toks = vec![0i32; text.len() + 16];
     let n = unsafe {
         ffi::llama_tokenize(
