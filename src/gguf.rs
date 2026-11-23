@@ -107,6 +107,36 @@ impl Gguf {
         self.tensor(name).is_some()
     }
 
+    pub(crate) fn shape(&self, name: &str) -> Result<Vec<usize>> {
+        let c = CString::new(name)?;
+        let id = unsafe { ffi::gguf_find_tensor(self.ctx, c.as_ptr()) };
+        anyhow::ensure!(id >= 0, "unknown tensor: {name}");
+        let mut shape =
+            unsafe { std::slice::from_raw_parts(ffi::gguf_get_tensor_ne(self.ctx, id), 4) }
+                .iter()
+                .map(|&v| usize::try_from(v))
+                .collect::<Result<Vec<_>, _>>()?;
+        while shape.len() > 1 && shape.last() == Some(&1) {
+            shape.pop();
+        }
+        Ok(shape)
+    }
+
+    pub(crate) fn backward_needs_expansion(&self) -> Result<bool> {
+        use ffi::ggml_type::*;
+        let mut bf16 = false;
+        unsafe {
+            for id in 0..ffi::gguf_get_n_tensors(self.ctx) {
+                match ffi::gguf_get_tensor_type(self.ctx, id) {
+                    GGML_TYPE_F32 => (),
+                    GGML_TYPE_BF16 => bf16 = true,
+                    _ => bail!("gradient requires F32 or BF16 model weights"),
+                }
+            }
+        }
+        Ok(bf16)
+    }
+
     /// Dequantize `rows` rows of `row_len` elements, starting at row `first`.
     pub fn rows(&self, name: &str, row_len: usize, first: usize, rows: usize) -> Result<Vec<f32>> {
         let t = self

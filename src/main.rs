@@ -7,6 +7,7 @@ mod edit_solve;
 mod ffi;
 mod gguf;
 mod grad;
+mod grad_select;
 mod jobs;
 mod model;
 #[cfg(feature = "ui")]
@@ -47,6 +48,15 @@ enum Cmd {
     Trace(trace::Args),
     /// Export a next-token gradient for a selected FFN down weight.
     Grad(grad::Args),
+    /// Export the next-token loss gradient at a weight or activation site.
+    GradSelect(grad_select::Args),
+    /// Encode raw text with model special tokens. Do not apply a chat template.
+    Tokenize {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        text: String,
+    },
     /// Compute ROME, MEMIT or AlphaEdit low-rank factors without writing source weights.
     LocateEdit(edit::Args),
     /// Run one small forward pass and show which graph nodes fill each role.
@@ -125,12 +135,18 @@ fn main() -> Result<()> {
     let cmd = match cli.cmd {
         Cmd::Trace(args) => return trace::run(args),
         Cmd::Grad(args) => return grad::run(args),
+        Cmd::GradSelect(args) => return grad_select::run(args),
+        Cmd::Tokenize { model, text } => return grad_select::tokenize(&model, &text),
         Cmd::LocateEdit(args) => return edit::run(args),
         cmd => cmd,
     };
     let store = Store::new(home(cli.home))?;
     match cmd {
-        Cmd::Trace(_) | Cmd::Grad(_) | Cmd::LocateEdit(_) => unreachable!(),
+        Cmd::Trace(_)
+        | Cmd::Grad(_)
+        | Cmd::GradSelect(_)
+        | Cmd::Tokenize { .. }
+        | Cmd::LocateEdit(_) => unreachable!(),
         Cmd::Probe {
             model,
             all,
