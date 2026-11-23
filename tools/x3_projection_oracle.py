@@ -66,6 +66,8 @@ def compare(args):
     assert weight.shape == (151936, 896) and weight.dtype == np.float32
     spec = dict(tokens=[26567, 362, 20, 572, 3465, 553], target_id=5085,
                 site=dict(kind="weight", name="blk.23.ffn_down.weight"))
+    if args.objective == "target_logit":
+        spec["objective"] = args.objective
     report = dict(spec=spec, model_sha256=MODEL_HASH, binary_sha256=digest(pin/"lanternfish"),
                   witness_sha256=digest(work/"libllama.so.0"), cases={})
     for backend in ("cpu", "cuda", "rocm"):
@@ -89,6 +91,8 @@ def compare(args):
                     placement(run.stderr, meta["placement"]["device"], {"backward"})
             g, h = (np.fromfile(cwd/name, "<f4").astype("d") for name in ("g_logits", "g_hidden"))
             assert g.shape == (151936,) and h.shape == (896,) and np.isfinite(g).all() and np.isfinite(h).all()
+            if args.objective == "target_logit":
+                assert g[spec["target_id"]] == 1. and np.count_nonzero(g) == 1
             ref = np.zeros(896)
             for i in range(0, len(g), 1024):
                 ref += g[i:i+1024] @ weight[i:i+1024].astype("d")
@@ -108,6 +112,9 @@ if __name__ == "__main__":
         p = subs.add_parser(fn.__name__)
         for key in keys:
             p.add_argument("--"+key, type=Path, required=True)
+        if fn is compare:
+            p.add_argument("--objective", choices=("target_logit", "next_token_cross_entropy"),
+                           default="next_token_cross_entropy")
         p.set_defaults(action=fn)
     parsed = ap.parse_args()
     parsed.action(parsed)

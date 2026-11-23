@@ -88,6 +88,43 @@ class SelectedGradient(unittest.TestCase):
             losses.append(self.run_site(site)[0]["loss"])
         self.assertAlmostEqual(g[i], (losses[1]-losses[0])/.002, delta=3e-4)
 
+    def test_raw_logit_matches_independent_trace_for_weight_and_activation(self):
+        binary = os.environ["LANTERNFISH_BIN"]
+        prompt = "abc"
+        tokens = json.loads(subprocess.check_output(
+            [binary, "tokenize", "--model", self.model, "--text", prompt]))["tokens"]
+        for site in (dict(kind="weight", name="blk.0.attn_v.weight"),
+                     dict(kind="activation", role="attn_out", layer=0, position=len(tokens)-2)):
+            write_model(self.model, "f32", "qwen2")
+            meta, g = self.run_site(site, tokens=tokens, objective="target_logit")
+            self.assertNotIn("loss", meta)
+            self.assertEqual(meta["objective"], "target_logit")
+            i = max(range(len(g)), key=lambda j: abs(g[j]))
+            self.assertGreater(abs(g[i]), 3e-4)
+            logits = []
+            for sign in (-1, 0, 1):
+                spec, rule = self.root/"trace", self.root/"rule"
+                opts = []
+                positions = [len(tokens)-1]
+                if site["kind"] == "weight":
+                    write_model(self.model, "f32", "qwen2", (site["name"], i, sign*.003))
+                else:
+                    positions.insert(0, site["position"])
+                    vec = [0.] * 32
+                    vec[i] = sign*.003
+                    rule.write_text(json.dumps([dict(layer=0, role="attn_out", positions=positions[:1],
+                                                       op="add", vector=vec)]))
+                    opts = ["--intervention", rule]
+                spec.write_text(json.dumps(dict(layers=[0], roles=["attn_out"], positions=positions,
+                                                top_k=263, byte_cap=200000)))
+                out = self.root/f"{site['kind']}-{sign}"
+                subprocess.run([binary, "trace", "--model", self.model, "--prompt", prompt,
+                    "--spec", spec, "--out", out, "--threads", "2", *opts], check=True)
+                rows = json.loads((out/"manifest.json").read_text())["model_logits"][-1]["top"]
+                logits.append(next(x["logit"] for x in rows if x["token_id"] == 6))
+            self.assertAlmostEqual(meta["logit"], logits[1], delta=3e-4)
+            self.assertAlmostEqual(g[i], (logits[2]-logits[0])/.006, delta=3e-4)
+
     def test_all_dense_qwen_weight_roles_and_sequence_edges(self):
         write_model(self.model, "bf16", "qwen2")
         for name in ("token_embd.weight", "output.weight", "output.bias", "output_norm.weight",

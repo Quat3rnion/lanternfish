@@ -18,6 +18,8 @@ def main():
     for key in ("pin", "model", "evidence"):
         ap.add_argument("--" + key, type=Path, required=True)
     ap.add_argument("--backends", nargs="+", default=["cpu", "cuda", "rocm"])
+    ap.add_argument("--objective", choices=("next_token_cross_entropy", "target_logit"),
+                    default="next_token_cross_entropy")
     args = ap.parse_args()
     assert args.backends[0] == "cpu"
     args.evidence.mkdir(exist_ok=True, parents=True)
@@ -35,6 +37,8 @@ def main():
             if site.get("position") == -1:
                 site = dict(site, position=len(tokens)-1)
             spec = dict(tokens=tokens, target_id=target, site=site)
+            if args.objective == "target_logit":
+                spec["objective"] = args.objective
             with tempfile.TemporaryDirectory() as w:
                 work = Path(w)
                 (work/"spec").write_text(json.dumps(spec))
@@ -50,18 +54,20 @@ def main():
                     meta = json.loads((out/"gradient.json").read_text())
                     data = np.fromfile(out/"gradient.f32", dtype="<f4")
                     assert meta["site"] == site and meta["backend"] == backend and np.isfinite(data).all()
+                    assert meta["objective"] == args.objective
+                    scalar = meta["logit" if args.objective == "target_logit" else "loss"]
                     if backend == "cpu":
-                        ref, ref_loss = data, meta["loss"]
+                        ref, ref_scalar = data, scalar
                     err = float(np.max(np.abs(ref-data)))
                     peak = float(np.max(np.abs(ref)))
                     rel = err/peak if peak else (0 if err == 0 else float("inf"))
-                    row = dict(case=case, spec=spec, **meta, relative_linf=rel, loss_error=abs(meta["loss"]-ref_loss))
+                    row = dict(case=case, spec=spec, **meta, relative_linf=rel, scalar_error=abs(scalar-ref_scalar))
                     if backend != "cpu":
                         row["audit"] = placement(result.stderr, meta["placement"]["device"], {"backward"})
                     report.append(row)
                     (args.evidence/"parity.json").write_text(json.dumps(report, indent=2))
-                    print(case, site, backend, rel, row["loss_error"], flush=True)
-    assert all(row["relative_linf"] <= .001 and row["loss_error"] <= 5e-5 for row in report)
+                    print(case, site, backend, rel, row["scalar_error"], flush=True)
+    assert all(row["relative_linf"] <= .001 and row["scalar_error"] <= 5e-5 for row in report)
 
 
 if __name__ == "__main__":

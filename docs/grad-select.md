@@ -1,6 +1,6 @@
 # Selected gradients, version 1
 
-Use `grad-select` to differentiate one next-token loss with respect to one
+Use `grad-select` to differentiate one next-token loss or raw logit with respect to one
 weight tensor or one activation row. The command does not edit the model.
 It supports dense Llama and Qwen2 GGUF inputs with F32 and BF16 weights.
 Use a new output directory for each call.
@@ -14,8 +14,11 @@ lanternfish grad-select --model model.gguf --spec site.json \
 `tokenize` writes `{"tokens":[...]}` to stdout. It uses the model vocabulary
 and special-token policy, without a chat template. `grad-select` accepts
 these token IDs directly. It does not add BOS or EOS. Pass 1 to 256 IDs
-within the model context. `target_id` is the observed next token, not the
-last input token. The scalar objective is `-log softmax(final_logits)[target_id]`.
+within the model context. `target_id` selects a token after the input, not the
+last input token. The default objective, `next_token_cross_entropy`, is
+`-log softmax(final_logits)[target_id]`. Set `"objective":"target_logit"`
+at the top level of the spec for the **raw, unnormalized** final-position
+`final_logits[target_id]`. Both objectives accept all weight and activation sites.
 
 Example `site.json` for a weight:
 
@@ -43,20 +46,23 @@ with respect to an additive displacement at the selected row, evaluated at
 zero. A site with no effect on the final token can have a zero derivative.
 For attribution patching from corrupt to clean, dot the corrupt-input
 gradient with `activation_clean - activation_corrupt` at the same site.
-This estimates the **change in loss**, not a change in a logit. Negate it
-for a change in log probability. Do not use it as a raw logit derivative.
-For the logit margin `logit[a] - logit[b]`, use `gradient(target_id=b) -
-gradient(target_id=a)` with identical inputs and site. The log normalizers
-cancel exactly. This gives X4 and X5 a contrast in logit units without a
-second type of objective.
+With the default objective, this estimates the **change in loss**, not a change
+in a logit. Negate it for a change in log probability. For X4, request
+`target_logit` and dot the weight gradient with `quantized - reference` in
+matching storage order. The result estimates the drift of that token's logit.
+For a logit margin `logit[a] - logit[b]`, subtract the `target_logit` gradient
+for `b` from the one for `a` at the same site and inputs. With cross entropy,
+reverse the subtraction: `gradient(NLL_b) - gradient(NLL_a)`. The log
+normalizers cancel.
 
 ## Output and checks
 
 `gradient.f32` holds contiguous little-endian F32 values. `gradient.json`
 is the completion record. Check `schema_version` (1), `objective`
-(`next_token_cross_entropy`), `dtype` (`f32_le`), `tokens`, `target_id`,
+(the requested objective), `dtype` (`f32_le`), `tokens`, `target_id`,
 `site`, `backend`, and `placement` (`strict: true` and the device name).
-Check the SHA-256 of the payload against `sha256`. `loss` and all elements
+Check the SHA-256 of the payload against `sha256`. The objective scalar
+(`loss` for cross entropy; `logit` for `target_logit`) and all elements
 must be finite. `shape` lists positive GGML extents from fastest to slowest;
 the file size must be `4 * product(shape)`. The activation shape is
 `[hidden_width]`; a matrix shape is `[input_width,output_width]`.

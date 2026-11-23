@@ -49,6 +49,16 @@ struct Spec {
     tokens: Vec<i32>,
     target_id: i32,
     site: Site,
+    #[serde(default)]
+    objective: Objective,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Objective {
+    #[default]
+    NextTokenCrossEntropy,
+    TargetLogit,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -178,11 +188,15 @@ pub(crate) fn run(args: Args) -> Result<()> {
         ffi::llama_init_from_model(raw, device.context_params(spec.tokens.len(), args.threads))
     };
     ensure!(!ll.ctx.is_null(), "gradient context unavailable");
-    let mut loss = 0.;
+    let mut value = 0.;
     let mut gradient = vec![0.; n];
     let zeros = weight.is_none().then(|| vec![0.; n]);
     let status = unsafe {
-        ffi::llama_lanternfish_grad_select(
+        let select = match spec.objective {
+            Objective::NextTokenCrossEntropy => ffi::llama_lanternfish_grad_select,
+            Objective::TargetLogit => ffi::llama_lanternfish_logit_grad_select,
+        };
+        select(
             ll.ctx,
             spec.tokens.as_ptr(),
             spec.tokens.len() as i32,
@@ -192,7 +206,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             role,
             position,
             zeros.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
-            &mut loss,
+            &mut value,
             gradient.as_mut_ptr(),
             n,
         )
@@ -203,7 +217,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         device.name()
     );
     ensure!(
-        loss.is_finite() && gradient.iter().all(|x| x.is_finite()),
+        value.is_finite() && gradient.iter().all(|x| x.is_finite()),
         "nonfinite result"
     );
     drop(ll);
@@ -216,8 +230,12 @@ pub(crate) fn run(args: Args) -> Result<()> {
     }
     out.flush()?;
     let sha256: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let scalar = match spec.objective {
+        Objective::NextTokenCrossEntropy => "loss",
+        Objective::TargetLogit => "logit",
+    };
     let meta = json!({"schema_version":1,"tokens":spec.tokens,"target_id":spec.target_id,"site":spec.site,
-        "dtype":"f32_le","shape":shape,"loss":loss,"objective":"next_token_cross_entropy","sha256":sha256,
+        "dtype":"f32_le","shape":shape,(scalar):value,"objective":spec.objective,"sha256":sha256,
         "backend":args.backend,"placement":{"device":device.name(),"strict":true}});
     fs::write(
         args.out.join("gradient.json.part"),
