@@ -11,7 +11,8 @@ from w14b_acceptance import audit_log, check_backend, load_json, run_cli, write_
 
 @unittest.skipUnless(os.environ.get("W14B_PLACEMENT_EVIDENCE"), "requires a GPU queue turn")
 class PlacementTests(unittest.TestCase):
-    def test_cuda_cli_has_no_cpu_compute_in_dispatched_graphs(self):
+    def test_gpu_cli_has_no_cpu_compute_in_dispatched_graphs(self):
+        backend = os.environ.get("W14B_PLACEMENT_BACKEND", "cuda")
         root = Path(os.environ["W14B_PLACEMENT_EVIDENCE"])
         root.mkdir()
         args = Namespace(binary=Path(os.environ["LANTERNFISH_BIN"]), evidence=root,
@@ -31,7 +32,7 @@ class PlacementTests(unittest.TestCase):
         }
         for command, options in commands.items():
             with self.subTest(command=command):
-                run_cli(args, command, command, "--model", model, "--backend", "cuda",
+                run_cli(args, command, command, "--model", model, "--backend", backend,
                         *options, audit=True, scheduler_debug=True)
                 # The final scheduler plan follows the last reserve. A real grad
                 # or edit must run it. Ignore unrelated reserve plans and c=0 nodes.
@@ -39,15 +40,15 @@ class PlacementTests(unittest.TestCase):
                 plan = log.rsplit("sched_reserve: reserve took", 1)[-1]
                 self.assertIn("## SPLIT", plan)
                 fallback = re.findall(
-                    r"^node #.*\( *GET_ROWS\): +embd .*?\[ *CPU +\] use=\d+,c=1:",
+                    r"^node #.*?\[ *CPU +\] use=\d+,c=1:",
                     plan, re.MULTILINE,
                 )
-                self.assertFalse(fallback, f"executed CPU embedding lookup: {fallback}")
+                self.assertFalse(fallback, f"executed CPU compute: {fallback}")
                 if command == "grad":
                     manifest = root / "gradient" / "manifest.json"
                     required = {"backward"}
                 else:
                     manifest = root / "rome.json"
                     required = {"forward", "backward"}
-                device = check_backend(load_json(manifest), "cuda")["device"]
+                device = check_backend(load_json(manifest), backend)["device"]
                 audit_log(root, command, device, required)

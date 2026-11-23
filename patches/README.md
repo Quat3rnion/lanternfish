@@ -33,9 +33,14 @@ sh patches/apply-llama.sh /path/to/llama.cpp
    fallback for backward computation.
 7. `0007-audit-complete-gpu-graphs.patch`: Check all active compute nodes
    before dispatch, including the forward prefix and ordinary edit decode.
-   Lanternfish puts the input embeddings on the selected CUDA device.
+   Lanternfish puts the input embeddings on the selected CUDA or ROCm device.
 8. `0008-adapt-rdna3-bf16-wmma-operands.patch`: Preserve the BF16 operand
    bits for RDNA3 WMMA with both the `short` and `__bf16` compiler signatures.
+
+The HIP runtime uses this same series. The gfx1036 pointer-batched GEMM
+workaround selects system-scope fences in the ROCm CLI process before
+backend initialization. It does not change GEMM in llama.cpp. See the
+[HIP build options and standalone reproducer](../docs/locate-edit.md#rocm-runtime).
 
 Build Lanternfish with headers and shared libraries from the **same** patched
 checkout. The gradient call adds a public symbol. An unpatched library cannot

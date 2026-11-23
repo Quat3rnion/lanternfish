@@ -14,6 +14,7 @@ use crate::{capture, ffi};
 pub(crate) enum Backend {
     Cpu,
     Cuda,
+    Rocm,
 }
 
 #[derive(Serialize)]
@@ -26,8 +27,17 @@ pub(crate) struct Device {
 
 impl Backend {
     pub(crate) fn select(self) -> Result<Device> {
-        if matches!(self, Self::Cuda) {
-            ensure_cuda_precision()?;
+        match self {
+            Self::Cpu => {}
+            Self::Cuda => ensure_gpu_env(&[
+                ("NVIDIA_TF32_OVERRIDE", "0"),
+                ("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "f32"),
+            ])?,
+            Self::Rocm => ensure_gpu_env(&[
+                // Device-scope fences can leave a stale batched GEMM pointer on gfx1036.
+                ("AMD_OPT_FLUSH", "0"),
+                ("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "f32"),
+            ])?,
         }
         capture::init_backends();
         let raw = unsafe {
@@ -35,12 +45,16 @@ impl Backend {
                 Self::Cpu => ffi::ggml_backend_dev_by_type(
                     ffi::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_CPU,
                 ),
-                Self::Cuda => {
-                    let reg = ffi::ggml_backend_reg_by_name(c"CUDA".as_ptr());
+                Self::Cuda | Self::Rocm => {
+                    let (name, backend) = if matches!(self, Self::Cuda) {
+                        (c"CUDA", "cuda")
+                    } else {
+                        (c"ROCm", "rocm")
+                    };
+                    let reg = ffi::ggml_backend_reg_by_name(name.as_ptr());
                     ensure!(
-                        !reg.is_null()
-                            && CStr::from_ptr(ffi::ggml_backend_reg_name(reg)) == c"CUDA",
-                        "cuda backend unavailable: no CUDA registry"
+                        !reg.is_null() && CStr::from_ptr(ffi::ggml_backend_reg_name(reg)) == name,
+                        "{backend} backend unavailable: no matching registry"
                     );
                     (0..ffi::ggml_backend_reg_dev_count(reg))
                         .map(|index| ffi::ggml_backend_reg_dev_get(reg, index))
@@ -51,7 +65,9 @@ impl Backend {
                                     | ffi::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU
                             )
                         })
-                        .context("cuda backend unavailable: no visible CUDA device")?
+                        .with_context(|| {
+                            format!("{backend} backend unavailable: no visible device")
+                        })?
                 }
             }
         };
@@ -67,14 +83,10 @@ impl Backend {
     }
 }
 
-// cuBLAS reads these environment variables during initialization. Relaunch
+// The GPU libraries read these variables during initialization. Relaunch
 // before backend discovery instead of mutating the running process environment.
-fn ensure_cuda_precision() -> Result<()> {
-    const ENV: [(&str, &str); 2] = [
-        ("NVIDIA_TF32_OVERRIDE", "0"),
-        ("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "f32"),
-    ];
-    if ENV
+fn ensure_gpu_env(env: &[(&str, &str)]) -> Result<()> {
+    if env
         .iter()
         .all(|(key, value)| std::env::var_os(key).as_deref() == Some(OsStr::new(value)))
     {
@@ -82,24 +94,33 @@ fn ensure_cuda_precision() -> Result<()> {
     }
 
     let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.args(std::env::args_os().skip(1)).envs(ENV);
+    cmd.args(std::env::args_os().skip(1))
+        .envs(env.iter().copied());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        Err(cmd.exec()).context("cannot relaunch with CUDA F32 precision")
+        Err(cmd.exec()).context("cannot relaunch with GPU runtime settings")
     }
     #[cfg(not(unix))]
     {
         let status = cmd
             .status()
-            .context("cannot relaunch with CUDA F32 precision")?;
+            .context("cannot relaunch with GPU runtime settings")?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }
 
 impl Device {
-    pub(crate) fn is_cuda(&self) -> bool {
-        matches!(self.backend, Backend::Cuda)
+    fn is_gpu(&self) -> bool {
+        !matches!(self.backend, Backend::Cpu)
+    }
+
+    pub(crate) fn moment_version(&self) -> &'static str {
+        match self.backend {
+            Backend::Cpu => "v1",
+            Backend::Cuda => "v2-cuda",
+            Backend::Rocm => "v2-rocm",
+        }
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -109,7 +130,7 @@ impl Device {
     pub(crate) fn load_model(&self, path: &Path, mmap: bool) -> Result<*mut ffi::llama_model> {
         let mut params = unsafe { ffi::llama_model_default_params() };
         let mut devices = [
-            if self.is_cuda() {
+            if self.is_gpu() {
                 self.raw
             } else {
                 ptr::null_mut()
@@ -120,11 +141,11 @@ impl Device {
         params.use_extra_bufts = false;
         params.n_gpu_layers = 0;
         let mut overrides = [ffi::llama_model_tensor_buft_override::default(); 2];
-        if self.is_cuda() {
+        if self.is_gpu() {
             let buft = unsafe { ffi::ggml_backend_dev_buffer_type(self.raw) };
             ensure!(!buft.is_null(), "no device buffer type for {}", self.name());
             // llama.cpp normally puts token embeddings on the CPU. Keep the
-            // lookup on CUDA along with the rest of the graph.
+            // lookup on the selected GPU along with the rest of the graph.
             overrides[0] = ffi::llama_model_tensor_buft_override {
                 pattern: c"^token_embd\\.weight$".as_ptr(),
                 buft,
@@ -142,9 +163,9 @@ impl Device {
 
     pub(crate) fn context_params(&self, n: usize, threads: i32) -> ffi::llama_context_params {
         let mut params = capture::cpu_context_params(n, n, threads);
-        params.op_offload = self.is_cuda();
-        params.offload_kqv = self.is_cuda();
-        params.lanternfish_gpu_only = self.is_cuda();
+        params.op_offload = self.is_gpu();
+        params.offload_kqv = self.is_gpu();
+        params.lanternfish_gpu_only = self.is_gpu();
         params
     }
 }

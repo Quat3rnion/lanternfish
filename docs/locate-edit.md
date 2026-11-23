@@ -5,12 +5,64 @@ Use `lanternfish locate-edit --model MODEL.gguf --request request.json
 does not write to `MODEL.gguf`. It returns low-rank factors for
 `blk.N.ffn_down.weight`.
 
-The default backend is `cpu`. Use `--backend cuda` to select
-the first visible CUDA device. The command fails if the device is not
+The default backend is `cpu`. Use `--backend cuda` or `--backend rocm`
+with the matching runtime build to select the first visible device in that
+backend. The same option applies to `grad`. The command fails if the device is not
 available or a forward or backward graph operation cannot run on it.
 The JSON output records the backend and ggml device name in `provenance`.
 The factor solve stays on the CPU, and data transfers between the host
 and the device are allowed.
+
+### ROCm runtime
+
+Use the patched llama.cpp base and the headless build in [INSTALL.md](../INSTALL.md).
+Use a separate build directory for HIP. For a staged ROCm SDK, source its
+`env.sh`, then add these options to the llama.cpp configuration:
+
+```sh
+-DGGML_HIP=ON -DGGML_CUDA=OFF -DGGML_HIP_RCCL=OFF -DGGML_HIP_NO_VMM=ON \
+-DGGML_CUDA_FA=OFF -DCMAKE_PREFIX_PATH="$ROCM_PATH" \
+-DCMAKE_HIP_COMPILER=/usr/bin/clang++ -DCMAKE_HIP_COMPILER_ROCM_ROOT="$ROCM_PATH" \
+-DCMAKE_HIP_FLAGS="--rocm-path=$ROCM_PATH" '-DCMAKE_HIP_ARCHITECTURES=gfx1151;gfx1036'
+```
+
+The library must include the rocBLAS Tensile data and code objects for the
+active device (`lib/rocblas/library`). Patch `0008` adapts the BF16 WMMA
+operand types for RDNA3. The edit path uses F32. No new WMMA kernel is needed.
+Use `HIP_VISIBLE_DEVICES` to select a device. The ROCm process sets
+`GGML_CUDA_CUBLAS_COMPUTE_TYPE=f32` (also read by HIP ggml) and
+`AMD_OPT_FLUSH=0` before it initializes the runtime.
+
+ROCm 10.1 on the local gfx1036 can read a null device pointer in an
+asynchronous pointer-batched GEMM. The standalone case has no ggml code:
+one kernel writes the pointer table, then hipBLAS reads it on the same
+stream. With the default device-scope fence, the Tensile kernel faults at
+address zero. With system-scope fences, all 160 outputs equal 20. This
+does not show that gfx1151 has the fault. The edit runtime uses system-scope
+fences on both targets. It does not turn on blocking launches.
+See the [ROCclr flag definition](https://github.com/ROCm/rocm-systems/blob/develop/projects/clr/rocclr/utils/flags.hpp).
+
+To run the standalone check, use a private output directory and an admitted
+GPU turn. The `AMD_OPT_FLUSH=1` case can fault; do not run it on a production GPU.
+
+```sh
+clang++ -O3 --rocm-path="$ROCM_PATH" --offload-arch=gfx1151 --offload-arch=gfx1036 \
+  tools/rocm_batched_gemm.hip -L"$ROCM_PATH/lib" -lhipblas -lamdhip64 -o "$TMPDIR/batch"
+AMD_OPT_FLUSH=0 "$TMPDIR/batch"
+```
+
+Run the placement smoke from the Lanternfish source tree. `LANTERNFISH_BIN`
+must refer to the verified binary. Set `W14B_PLACEMENT_EVIDENCE` to a new
+directory. Run the full acceptance with the FP64 witness for the selected
+GPU and runtime, not a witness from another GPU:
+
+```sh
+W14B_PLACEMENT_BACKEND=rocm python3 -B -m unittest discover -s tools -p test_w14b_placement.py
+python3 -B tools/w14b_acceptance.py --backend rocm --threads 6 --binary "$LANTERNFISH_BIN" \
+  --evidence "$EVIDENCE" --oracle "$ORACLE" --oracle-sha256 "$ORACLE_SHA256"
+```
+
+### Edit request
 
 The request uses this format:
 
