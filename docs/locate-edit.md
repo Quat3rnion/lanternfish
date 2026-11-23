@@ -30,7 +30,8 @@ Patch `0003` extends the W0 F32 backward graph to optimize a displacement at
 the subject position. It uses full teacher-forced target cross entropy, a
 weak KL term on the clean subject distribution, and norm-limited Adam. It
 uses two fixed contexts and a small corpus, not the published generated
-context templates or full Wikipedia statistics. Clean MLP output plus the
+context templates or full Wikipedia statistics. Average the two context
+keys for each fact before the closed-form solve. Clean MLP output plus the
 displacement gives `v*` for ROME. Clean last edit layer residual plus the
 displacement gives `z*` for MEMIT and AlphaEdit.
 

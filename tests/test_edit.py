@@ -69,8 +69,8 @@ class EditTests(unittest.TestCase):
                     self.assertEqual(result["source_dtype"], "bf16")
                     self.assertEqual([u["layer"] for u in result["updates"]], [0, 1])
                     for u in result["updates"]:
-                        self.assertEqual([len(v) for v in u["keys"]], [64] * 4)
-                        self.assertEqual([len(v) for v in u["values"]], [32] * 4)
+                        self.assertEqual([len(v) for v in u["keys"]], [64] * 2)
+                        self.assertEqual([len(v) for v in u["values"]], [32] * 2)
                     self.assertTrue(all(a > b for a, b in result["losses"]))
                     current = {p.name: p.stat().st_mtime_ns for p in cache.iterdir()}
                     self.assertEqual(len(current), 2)

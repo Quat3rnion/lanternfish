@@ -17,6 +17,7 @@ const MAX_TOKENS: usize = 128;
 const MAX_TARGET: usize = 12;
 const MAX_CACHED_MOMENTS: usize = 12;
 const PREFIXES: [&str; 2] = ["", "Here is a note. "];
+const CONTEXT_GROUPS: [usize; 2] = [1, 1];
 
 #[derive(clap::Args)]
 pub(crate) struct Args {
@@ -503,7 +504,7 @@ fn solve(
     let mut lookup = Vec::new();
     for (contexts, target) in loc.iter().zip(targets) {
         let mut residual = Vec::new();
-        let mut mean = vec![0.0; e.cols];
+        let mut context_keys = Vec::new();
         for (i, (tok, pos)) in contexts.iter().enumerate() {
             let c = e.sample(tok, layer, z_layer)?;
             let k = &c.keys[*pos];
@@ -522,19 +523,10 @@ fn solve(
                     lookup = to_f64(k);
                 }
             }
-            if req.method == Method::Rome {
-                for (out, k) in mean.iter_mut().zip(k) {
-                    *out += *k as f64 / contexts.len() as f64;
-                }
-            } else {
-                keys.push(to_f64(k));
-                values.push(residual.clone());
-            }
+            context_keys.push(k.clone());
         }
-        if req.method == Method::Rome {
-            keys.push(mean);
-            values.push(residual);
-        }
+        keys.push(edit_solve::mean_key(&context_keys, &CONTEXT_GROUPS));
+        values.push(residual);
     }
     let keys = match req.method {
         Method::Rome => edit_solve::rome(keys.remove(0), &lookup, &mm, ridge * 0.01),

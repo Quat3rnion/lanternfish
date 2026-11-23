@@ -11,6 +11,23 @@ fn axpy(x: &mut [f64], y: &[f64], s: f64) {
     }
 }
 
+/// Each context group contributes its mean with equal weight.
+pub(super) fn mean_key(keys: &[Vec<f32>], groups: &[usize]) -> Vec<f64> {
+    debug_assert_eq!(groups.iter().sum::<usize>(), keys.len());
+    let mut mean = vec![0.0; keys[0].len()];
+    let mut start = 0;
+    for &count in groups {
+        let weight = 1.0 / (groups.len() * count) as f64;
+        for key in &keys[start..start + count] {
+            for (out, &value) in mean.iter_mut().zip(key) {
+                *out += value as f64 * weight;
+            }
+        }
+        start += count;
+    }
+    mean
+}
+
 struct Gram {
     lower: Vec<Vec<f64>>,
 }
@@ -160,6 +177,28 @@ mod tests {
         near(a[0][1], -1.0 / 7.0);
         near(a[1][0], 1.0 / 7.0);
         near(a[1][1], 3.0 / 7.0);
+    }
+
+    #[test]
+    fn batch_key_means_match_reference_context_group_weighting() {
+        let facts = [
+            [
+                vec![8.0, 4.0],
+                vec![1.0, 0.0],
+                vec![2.0, 2.0],
+                vec![3.0, 4.0],
+            ],
+            [
+                vec![0.0, 3.0],
+                vec![3.0, 1.0],
+                vec![6.0, 3.0],
+                vec![9.0, 5.0],
+            ],
+        ];
+        // The reference gives the canonical group and the three-template
+        // group equal weight, not the four templates equal weight.
+        let means: Vec<_> = facts.iter().map(|keys| mean_key(keys, &[1, 3])).collect();
+        assert_eq!(means, [vec![5.0, 3.0], vec![3.0, 3.0]]);
     }
 
     #[test]
