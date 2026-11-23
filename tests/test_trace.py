@@ -76,6 +76,40 @@ class TraceTests(unittest.TestCase):
             self.assertEqual(lens["token_id"], actual["token_id"])
             self.assertAlmostEqual(lens["logit"], actual["logit"], places=5)
 
+    def test_moe_routes_and_expert_ablation(self):
+        roles = ["ffn_moe_logits", "ffn_moe_topk", "ffn_moe_route_weights", "l_out"]
+        self.spec.update(layers=[0], roles=roles, positions=[1, 2], byte_cap=65536)
+        for arch in ("qwen2moe", "qwen3moe"):
+            with self.subTest(arch=arch):
+                def run(out, rules=None):
+                    manifest = self.trace("f32", out, rules=rules, arch=arch)
+                    self.assertEqual(manifest["schema_version"], 1)
+                    self.assertEqual(manifest["missing"], [])
+                    self.assertEqual(manifest["logit_lens"], [])
+                    self.assertEqual(len(manifest["model_logits"]), 2)
+                    return manifest, {
+                        (row["position"], row["role"]): self.tensor(row, out)
+                        for row in manifest["tensors"]
+                    }
+
+                _, base = run(f"{arch}-base")
+                logits, ids, weights = (base[1, role] for role in roles[:3])
+                self.assertEqual(list(ids), sorted(range(len(logits)),
+                                                   key=lambda i: -logits[i])[:len(ids)])
+                self.assertEqual(len(weights), len(ids))
+                self.assertTrue(all(0 < weight <= 1 for weight in weights))
+                manifest, edit = run(f"{arch}-edit", [
+                    {"layer": 0, "role": "ffn_out", "positions": [1],
+                     "op": "zero_expert", "expert": int(ids[0])},
+                ])
+                self.assertEqual(manifest["interventions"], [
+                    {"layer": 0, "role": "ffn_out", "position": 1, "expert": int(ids[0])},
+                ])
+                for role in roles[:3]:
+                    self.assertEqual(edit[1, role], base[1, role])
+                self.assertNotEqual(edit[1, "l_out"], base[1, "l_out"])
+                self.assertEqual(edit[2, "l_out"], base[2, "l_out"])
+
     def test_legacy_run_still_writes_viz_json(self):
         model = self.work / "legacy.gguf"
         write_model(model, "f32")
@@ -126,9 +160,48 @@ class TraceTests(unittest.TestCase):
                     self.assertAlmostEqual(sum(after["kq_soft_max", 0][head*keys:(head+1)*keys]), 1)
                     self.assertEqual(after["kq_soft_max", 0][head*keys + 1], 0)
 
+    def test_direction_interventions_on_selected_qwen2_rows(self):
+        self.spec.update(layers=[1], positions=[0, 1, 2], byte_cap=8192)
+        direction = [2.0, -1.0] + [0.0] * 30
+        base = self.trace("bf16", "base", arch="qwen2")
+        common = {"layer": 1, "role": "l_out", "vector": direction}
+        edit = self.trace("bf16", "edit", arch="qwen2", rules=[
+            dict(common, positions=[0], op="project_out"),
+            dict(common, positions=[2], op="subtract", scale=0.25),
+        ])
+        before = [self.tensor(entry, "base") for entry in base["tensors"]]
+        after = [self.tensor(entry, "edit") for entry in edit["tensors"]]
+        self.assertGreater(abs(2 * before[0][0] - before[0][1]), 1e-5)
+        self.assertAlmostEqual(2 * after[0][0] - after[0][1], 0, places=6)
+        self.assertAlmostEqual(after[0][0] + 2 * after[0][1],
+                               before[0][0] + 2 * before[0][1], places=6)
+        self.assertEqual(after[0][2:], before[0][2:])
+        self.assertEqual(after[1], before[1])
+        for observed, original, d in zip(after[2], before[2], direction):
+            self.assertAlmostEqual(observed, original - 0.25 * d, places=6)
+        self.assertNotEqual(edit["model_logits"], base["model_logits"])
+        self.assertIn("nonzero", self.trace("bf16", "invalid", arch="qwen2", check=False,
+                                            rules=[dict(common, positions=[0], op="project_out",
+                                                        vector=[0.0] * 32)]))
+
     def test_byte_cap_includes_manifest_and_tensors(self):
         self.spec["byte_cap"] = 256  # the two residuals fit, the manifest does not
         self.assertIn("byte_cap", self.trace("f32", check=False))
+
+    def test_full_logits_and_scaled_projection(self):
+        self.spec.update(layers=[], roles=[], positions=[1], top_k=3, byte_cap=65536)
+        top = self.trace("bf16", "top", arch="qwen2")["model_logits"][0]["top"]
+        self.spec.update(top_k=0, all_logits=True)
+        baseline = self.trace("bf16", "full", arch="qwen2")["model_logits"][0]["top"]
+        self.assertEqual([row["token_id"] for row in baseline], list(range(len(baseline))))
+        self.assertEqual(top, sorted(baseline, key=lambda row: (-row["logit"], row["token_id"]))[:3])
+        rule = {"layer": 1, "role": "l_out", "positions": [1],
+                "op": "project_out", "vector": [1.] + [0.] * 31}
+        plain = self.trace("bf16", "default", arch="qwen2", rules=[rule])
+        unit = self.trace("bf16", "unit", arch="qwen2", rules=[dict(rule, scale=1)])
+        scaled = self.trace("bf16", "scaled", arch="qwen2", rules=[dict(rule, scale=1.5)])
+        self.assertEqual(plain["model_logits"], unit["model_logits"])
+        self.assertNotEqual(plain["model_logits"], scaled["model_logits"])
 
     def test_lens_only_does_not_export_or_charge_residual_payloads(self):
         self.spec.update(roles=[], top_k=1, byte_cap=1000)

@@ -33,13 +33,23 @@ lanternfish trace --model model.gguf --prompt "The capital of France is" \
   normalization. `ffn_out` is the FFN write before the residual add.
   `kq_soft_max` is the attention probability tensor when exposed by the graph.
 - `top_k` selects the number of logits to keep at each position. It also
-  enables a logit lens for each selected layer and position with `l_out`,
+  enables a logit lens on dense Llama and Qwen2 for each selected layer and position with `l_out`,
   even if `roles` does not include `l_out`. Set `top_k` to `0` to skip logits.
   Set `layers` and `roles` to `[]` for model logits only. `top_k` cannot
   exceed the vocabulary size.
+- `all_logits: true` returns every model logit in token ID order. Use an
+  empty `layers` list, one position, and `top_k: 0`. The vocabulary limit
+  is 262144 entries. The byte cap still applies.
 - `byte_cap` is the maximum for the manifest and all binary payloads together.
   The command fails instead of discarding requested data to fit the cap. The
   cap is not a limit on model memory, ggml work buffers, or projection memory.
+
+For Qwen2MoE and Qwen3MoE, select `ffn_moe_logits` for raw router scores
+(`shape: [n_experts]`). Select `ffn_moe_topk` and `ffn_moe_route_weights`
+for the selected expert IDs and final mixing weights in the same slot order
+(`shape: [experts_per_token]`). IDs are exact integers stored as `f32_le`.
+These roles are read-only. `top_k` still controls model output logits, not
+the number of experts. MoE traces do not have a logit lens.
 
 ## Intervene during a trace
 
@@ -57,8 +67,14 @@ lanternfish trace --model model.gguf --prompt "The capital of France is" \
   --spec spec.json --intervention edit.json --out trace-edit
 ```
 
-Use `add` or `replace` with a `vector` array of finite numbers, one per hidden
-dimension. `scale` multiplies the row by a finite `factor`. `zero` sets all
+Use `add`, `replace`, `project_out`, or `subtract` with a `vector` array of
+finite numbers, one per hidden dimension. `project_out` removes the component
+of the row along the nonzero vector. The vector does not have to be a unit
+vector. Its optional `scale` (0 to 4, default 1) multiplies the subtracted
+component. Set `keep_norm: true` to rescale the edited row to its original
+L2 norm. A projection that gives an exactly zero row leaves the original
+row unchanged when `keep_norm` is true. `subtract` subtracts the vector multiplied by the finite, nonnegative
+`scale`. The `scale` operation multiplies the row by a finite `factor`. `zero` sets all
 values in the row to zero. `kq_soft_max` is read-only. Rules can target rows
 outside the capture spec. Two rules cannot edit the same layer, role, and
 position. The command fails if it cannot apply any requested edit.
@@ -67,6 +83,13 @@ Lanternfish changes the F32 activation after the node runs and before its
 consumers run. Capture records the value **after** the edit. An edit can affect
 later nodes and tokens through normal data flow. It does not change an
 attention calculation or KV write that has already run.
+
+For a Qwen2MoE or Qwen3MoE expert ablation, use
+`{"layer":0,"role":"ffn_out","positions":[1],"op":"zero_expert","expert":3}`.
+Lanternfish sets the selected expert's weighted contribution to zero before
+the expert sum. It does not select a replacement or normalize the other
+weights again. It makes no change at positions that did not select the
+specified expert. The manifest records `expert` for each requested position.
 
 ## Trace file layout
 
@@ -83,13 +106,13 @@ is `"trace"`. Other fields:
 | `tokens` | Full prompt token sequence as `{position, token_id}` records. |
 | `tensors` | Payload descriptors, one per captured `(layer, role, position)`, with those three fields and `node`, the full graph node name. |
 | `missing` | Requested `(layer, role, position)` records that the graph did not expose. |
-| `interventions` | `(layer, role, position)` records for applied edits. Keep the input intervention file to reproduce the edit. |
+ | `interventions` | `(layer, role, position)` records for applied edits. Expert ablations also give `expert`. Keep the input intervention file to reproduce the edit. |
 | `model_logits` | `{position, top}` records from llama.cpp. |
 | `logit_lens` | `{layer, position, top}` records from projecting `l_out` through the model's RMS norm and output head, including Qwen2's optional output bias. If a model ties its head, the projection uses its token embeddings. Missing `l_out` nodes have no lens record. |
 
 Each `top` is a list of `{token_id, logit}` records. Values are raw logits,
 not probabilities. The list is sorted by decreasing logit, then by increasing
-token ID for ties.
+token ID for ties. With `all_logits: true`, the list is in token ID order.
 
 Each payload descriptor has `file`, `shape`, `dtype`, `bytes`, and `sha256`.
 `file` is a relative file name such as `tensor-000000.f32`; `dtype` is

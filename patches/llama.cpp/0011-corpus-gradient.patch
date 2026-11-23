@@ -1,0 +1,298 @@
+diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index 02d5eff..975b0f5 100644
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -11,6 +11,7 @@
+ #include <algorithm>
+ #include <cfloat>
+ #include <cmath>
++#include <vector>
+ 
+ // ggml_compute_forward_dup
+ 
+@@ -4671,6 +4672,23 @@ static void ggml_compute_forward_out_prod_f32(
+     // nb01 >= nb00 - src0 is not transposed
+     //   compute by src0 rows
+ 
++    if (dst->op_params[0] == 1) {
++        GGML_ASSERT(ne2 == 1 && ne3 == 1 && ggml_is_contiguous(dst));
++        for (int64_t j = ith; j < ne1; j += nth) {
++            auto * row = (float *) ((char *) dst->data + j*nb1);
++            std::vector<double> acc(ne0, 0.0);
++            for (int64_t t = 0; t < ne01; ++t) {
++                const auto * w = (const float *) ((const char *) src0->data + t*nb01);
++                const double g = *(const float *) ((const char *) src1->data + j*nb10 + t*nb11);
++                for (int64_t x = 0; x < ne0; ++x) {
++                    acc[x] += w[x]*g;
++                }
++            }
++            std::copy(acc.begin(), acc.end(), row);
++        }
++        return;
++    }
++
+     if (ith == 0) {
+         ggml_vec_set_f32(ne0*ne1*ne2*ne3, (float *)dst->data, 0);
+     }
+diff --git a/include/llama.h b/include/llama.h
+index 2eb3e5c..127dd66 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -1748,6 +1748,17 @@ extern "C" {
+                            float * grad,
+                           size_t   grad_count);
+ 
++    struct llama_lanternfish_weight_sum {
++        const char * name;
++        double * sum;
++        size_t elements;
++    };
++
++    // Accumulate count * d(mean NLL)/dw. tokens has count + 1 entries.
++    LLAMA_API int32_t llama_lanternfish_grad_sequence(
++            struct llama_context * ctx, const llama_token * tokens, int32_t count,
++            struct llama_lanternfish_weight_sum * weights, size_t n_weights, float * mean_loss);
++
+     // Select one GGUF weight (weight_name != NULL) or a position in an activation
+     // (delta != NULL; role 0: l_out, 1: attn_out, 2: ffn_out). Same context and
+     // loss contract as above. Shared input/output weights include both uses.
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 6a3f587..0300f20 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -3776,7 +3776,8 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
+ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t count, llama_token target,
+         int32_t layer, float * loss_out, float * grad_out, size_t grad_count,
+         int32_t first_label, const float * soft_labels, int32_t position, const float * delta,
+-        const char * weight_name, int32_t role, bool raw_logit) {
++        const char * weight_name, int32_t role, bool raw_logit,
++        llama_lanternfish_weight_sum * weights, size_t n_weights) {
+     const int32_t n_vocab = model.vocab.n_tokens();
+     const bool residual = delta != nullptr;
+     bool gpu = false;
+@@ -3786,7 +3787,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+         gpu = (name == "CUDA" || name == "ROCm") && cparams.offload_kqv &&
+               model.n_gpu_layers() > model.hparams.n_layer_all;
+     }
+-    if (!tokens || !loss_out || !grad_out || count <= 0 || uint32_t(count) > cparams.n_ubatch ||
++    if (!tokens || !loss_out || (!weights && !grad_out) || count <= 0 || uint32_t(count) > cparams.n_ubatch ||
+             layer < 0 || size_t(layer) >= model.layers.size() ||
+             (residual && (first_label < 0 || first_label >= count || role < 0 || role > 2 ||
+              position < 0 || position >= count || grad_count != model.hparams.n_embd)) ||
+@@ -3803,7 +3804,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+         }
+     }
+     auto * weight = model.layers[layer].ffn_down;
+-    if (!weight_name && (!weight || (!residual && size_t(ggml_nelements(weight)) != grad_count))) {
++    if (!weights && !weight_name && (!weight || (!residual && size_t(ggml_nelements(weight)) != grad_count))) {
+         throw std::runtime_error("wrong FFN down weight size");
+     }
+     for (int32_t i = 0; i < count; ++i) {
+@@ -3814,7 +3815,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+ 
+     // Build the ordinary model graph, with the existing training path that
+     // reads K/V directly rather than through the non-differentiable KV cache.
+-    std::vector<int8_t> logits(count, residual ? 1 : 0);
++    std::vector<int8_t> logits(count, (residual || weights) ? 1 : 0);
+     logits.back() = 1;
+     auto batch = llama_batch_get_one(const_cast<llama_token *>(tokens), count);
+     batch.logits = logits.data();
+@@ -3829,7 +3830,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+     }
+     const auto & ubatch = mctx->get_ubatch();
+     cparams.training = true;
+-    n_outputs = residual ? count : 1;
++    n_outputs = (residual || weights) ? count : 1;
+     const size_t capacity = graph_max_nodes(count);
+     sched_new(capacity, false);
+     llm_graph_result res(capacity);
+@@ -3866,7 +3867,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+     if (!forward || !output || output->ne[0] != n_vocab || output->ne[1] != n_outputs) {
+         throw std::runtime_error("missing target logits");
+     }
+-    const int32_t n_labels = residual ? count - first_label : 1;
++    const int32_t n_labels = weights ? count : residual ? count - first_label : 1;
+     if (residual) {
+         output = ggml_view_2d(meta.get(), output, n_vocab, n_labels,
+                 output->nb[1], first_label * output->nb[1]);
+@@ -3883,46 +3884,79 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+ 
+     // A tied embedding can have two device tensors for one GGUF name. Select
+     // every live use, but mark each distinct pointer once.
+-    std::map<ggml_tensor *, int32_t> params;
+-    if (weight_name) {
++    const size_t sites = weights ? n_weights : 1;
++    std::vector<std::map<ggml_tensor *, int32_t>> uses(sites);
++    if (weight_name || weights) {
++        std::map<std::string, size_t> names;
++        for (size_t j = 0; j < sites; ++j) {
++            if (!names.emplace(weights ? weights[j].name : weight_name, j).second) {
++                throw std::runtime_error("duplicate weight");
++            }
++        }
+         for (int i = 0; i < ggml_graph_n_nodes(forward); ++i) {
+             auto * node = ggml_graph_node(forward, i);
+             for (auto * src : node->src) {
+-                if (src && src->op == GGML_OP_NONE && strcmp(src->name, weight_name) == 0) {
+-                    if (size_t(ggml_nelements(src)) != grad_count ||
++                if (!src || src->op != GGML_OP_NONE) {
++                    continue;
++                }
++                auto it = names.find(src->name);
++                if (it != names.end()) {
++                    size_t j = it->second;
++                    if (size_t(ggml_nelements(src)) != (weights ? weights[j].elements : grad_count) ||
+                             (node->op == GGML_OP_ROPE && src == node->src[2])) {
+                         throw std::runtime_error("invalid size or non-trainable RoPE frequency table");
+                     }
+-                    params.emplace(src, src->flags);
++                    uses[j].emplace(src, src->flags);
+                 }
+             }
+         }
+     } else {
+-        params.emplace(param, param->flags);
++        uses[0].emplace(param, param->flags);
+     }
+-    if (params.empty()) {
+-        throw std::runtime_error("weight has no differentiable graph use");
++    for (const auto & params : uses) {
++        if (params.empty()) {
++            throw std::runtime_error("weight has no differentiable graph use");
++        }
+     }
+-    for (const auto & p : params) {
+-        ggml_set_param(p.first);
++    for (const auto & params : uses) {
++        for (const auto & p : params) {
++            ggml_set_param(p.first);
++        }
+     }
+     ggml_build_forward_expand(graph, loss);
+     ggml_build_backward_expand(meta.get(), graph, nullptr);
+-    ggml_tensor * grad = nullptr;
+-    for (const auto & p : params) {
+-        p.first->flags = p.second;
+-        auto * part = ggml_graph_get_grad(graph, p.first);
+-        if (!part) {
+-            throw std::runtime_error("missing gradient for a weight use");
++    // Long vocabulary reductions lose precision in the CPU OUT_PROD row sum.
++    if (weights && !gpu && n_vocab >= 8192) {
++        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++            auto * node = ggml_graph_node(graph, i);
++            if (node->op == GGML_OP_OUT_PROD && node->src[0] == model.output &&
++                    ggml_is_matrix(node->src[0]) && ggml_is_matrix(node->src[1])) {
++                node->op_params[0] = 1; // use the F64 accumulator in the CPU backend
++            }
+         }
+-        grad = grad ? ggml_add(meta.get(), grad, part) : part;
+     }
+-    ggml_build_forward_expand(graph, grad);
+-    if (!grad || grad->type != GGML_TYPE_F32 || !ggml_is_contiguous(grad) ||
+-            ggml_nbytes(grad) != grad_count * sizeof(float)) {
+-        throw std::runtime_error("missing parameter gradient");
++    for (const auto & params : uses) {
++        for (const auto & p : params) {
++            p.first->flags = p.second;
++        }
++    }
++    std::vector<ggml_tensor *> grads(sites);
++    for (size_t j = 0; j < sites; ++j) {
++        auto & grad = grads[j];
++        for (const auto & p : uses[j]) {
++            auto * part = ggml_graph_get_grad(graph, p.first);
++            if (!part) {
++                throw std::runtime_error("missing gradient for a weight use");
++            }
++            grad = grad ? ggml_add(meta.get(), grad, part) : part;
++        }
++        ggml_build_forward_expand(graph, grad);
++        if (grad->type != GGML_TYPE_F32 || !ggml_is_contiguous(grad) ||
++                size_t(ggml_nelements(grad)) != (weights ? weights[j].elements : grad_count)) {
++            throw std::runtime_error("missing parameter gradient");
++        }
++        ggml_set_output(grad);
+     }
+-    ggml_set_output(grad);
+     if (!ggml_backend_sched_alloc_graph(sched.get(), graph)) {
+         throw std::runtime_error("could not allocate gradient graph");
+     }
+@@ -3934,7 +3968,13 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+         ggml_backend_tensor_set(cparams.lanternfish_mask, mask.data(), 0, count * sizeof(float));
+         ggml_backend_tensor_set(param, delta, 0, ggml_nbytes(param));
+     }
+-    if (soft_labels) {
++    if (weights) {
++        std::vector<float> rows(size_t(n_vocab) * count, 0.0f);
++        for (int32_t i = 0; i < count; ++i) {
++            rows[size_t(i)*n_vocab + tokens[i+1]] = 1.0f;
++        }
++        ggml_backend_tensor_set(labels, rows.data(), 0, ggml_nbytes(labels));
++    } else if (soft_labels) {
+         ggml_backend_tensor_set(labels, soft_labels, 0, ggml_nbytes(labels));
+     } else {
+         std::vector<float> one_hot(n_vocab, 0.0f);
+@@ -3947,7 +3987,21 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+     }
+     ggml_backend_sched_synchronize(sched.get());
+     ggml_backend_tensor_get(loss, loss_out, 0, sizeof(float));
+-    ggml_backend_tensor_get(grad, grad_out, 0, ggml_nbytes(grad));
++    if (weights) {
++        std::vector<float> block(256*1024);
++        for (size_t j = 0; j < sites; ++j) {
++            for (size_t off = 0; off < weights[j].elements; off += block.size()) {
++                size_t n = std::min(block.size(), weights[j].elements - off);
++                ggml_backend_tensor_get(grads[j], block.data(), off*sizeof(float), n*sizeof(float));
++                for (size_t i = 0; i < n; ++i) {
++                    weights[j].sum[off+i] += double(block[i])*count;
++                }
++            }
++        }
++    } else {
++        auto * grad = grads[0];
++        ggml_backend_tensor_get(grad, grad_out, 0, ggml_nbytes(grad));
++    }
+ }
+ 
+ static void llama_set_param(struct ggml_tensor * tensor, llama_opt_param_filter param_filter, void * userdata) {
+@@ -4927,6 +4981,26 @@ static int32_t lanternfish_select(llama_context * ctx, const llama_token * token
+     }
+ }
+ 
++int32_t llama_lanternfish_grad_sequence(llama_context * ctx, const llama_token * tokens, int32_t count,
++        llama_lanternfish_weight_sum * weights, size_t n_weights, float * mean_loss) {
++    try {
++        if (!ctx || !tokens || count <= 0 || !weights || n_weights == 0 || n_weights > 4096) {
++            return -1;
++        }
++        for (size_t j = 0; j < n_weights; ++j) {
++            if (!weights[j].name || !weights[j].sum || !weights[j].elements) {
++                return -1;
++            }
++        }
++        ctx->lanternfish_gradient(tokens, count, tokens[count], 0, mean_loss, nullptr, 0,
++                0, nullptr, -1, nullptr, nullptr, 0, false, weights, n_weights);
++        return 0;
++    } catch (const std::exception & e) {
++        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
++        return -1;
++    }
++}
++
+ int32_t llama_lanternfish_grad_select(llama_context * ctx, const llama_token * tokens, int32_t count,
+         llama_token target, const char * weight, int32_t layer, int32_t role, int32_t position,
+         const float * delta, float * loss, float * grad, size_t n) {
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 0ed8214..41ae347 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -208,7 +208,8 @@ struct llama_context {
+                               float * loss_out, float * grad_out, size_t grad_count,
+                               int32_t first_label = -1, const float * labels = nullptr,
+                               int32_t position = -1, const float * delta = nullptr,
+-                              const char * weight_name = nullptr, int32_t role = 0, bool raw_logit = false);
++                              const char * weight_name = nullptr, int32_t role = 0, bool raw_logit = false,
++                              llama_lanternfish_weight_sum * weights = nullptr, size_t n_weights = 0);
+ 
+     // TODO: more flexible combinations of logical/physical batch size and context size
+     void opt_epoch(

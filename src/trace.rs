@@ -43,15 +43,21 @@ pub(crate) enum Role {
     FfnInp,
     FfnOut,
     KqSoftMax,
+    FfnMoeLogits,
+    FfnMoeTopk,
+    FfnMoeRouteWeights,
 }
 
 impl Role {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 8] = [
         Self::LOut,
         Self::AttnOut,
         Self::FfnInp,
         Self::FfnOut,
         Self::KqSoftMax,
+        Self::FfnMoeLogits,
+        Self::FfnMoeTopk,
+        Self::FfnMoeRouteWeights,
     ];
 
     fn name(self) -> &'static str {
@@ -61,7 +67,17 @@ impl Role {
             Self::FfnInp => "ffn_inp",
             Self::FfnOut => "ffn_out",
             Self::KqSoftMax => "kq_soft_max",
+            Self::FfnMoeLogits => "ffn_moe_logits",
+            Self::FfnMoeTopk => "ffn_moe_topk",
+            Self::FfnMoeRouteWeights => "ffn_moe_route_weights",
         }
+    }
+
+    fn routing(self) -> bool {
+        matches!(
+            self,
+            Self::FfnMoeLogits | Self::FfnMoeTopk | Self::FfnMoeRouteWeights
+        )
     }
 }
 
@@ -73,6 +89,12 @@ pub(crate) struct Spec {
     pub(crate) positions: BTreeSet<usize>,
     pub(crate) top_k: usize,
     pub(crate) byte_cap: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) all_logits: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Deserialize, Serialize)]
@@ -87,21 +109,98 @@ struct Rule {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
-    Add { vector: Vec<f32> },
-    Replace { vector: Vec<f32> },
-    Scale { factor: f32 },
+    Add {
+        vector: Vec<f32>,
+    },
+    Replace {
+        vector: Vec<f32>,
+    },
+    ProjectOut {
+        vector: Vec<f32>,
+        #[serde(default = "unit_scale")]
+        scale: f64,
+        #[serde(default)]
+        keep_norm: bool,
+    },
+    Subtract {
+        vector: Vec<f32>,
+        scale: f32,
+    },
+    Scale {
+        factor: f32,
+    },
     Zero,
+    ZeroExpert { expert: usize },
+}
+
+fn unit_scale() -> f64 {
+    1.0
+}
+
+#[cfg(test)]
+mod scaled_projection_tests {
+    use super::*;
+
+    #[test]
+    fn scaled_projection_crosses_zero_and_can_preserve_norm() {
+        let mut row = [3.0_f32, 4.0];
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.], "scale":1.5
+        }))
+        .unwrap();
+        op.validate(2).unwrap();
+        op.apply(&mut row);
+        assert_eq!(row, [-1.5, 4.0]);
+        row = [3.0, 4.0];
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.], "keep_norm":true
+        }))
+        .unwrap();
+        op.validate(2).unwrap();
+        op.apply(&mut row);
+        assert_eq!(row, [0.0, 5.0]);
+
+        let old: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.]
+        }))
+        .unwrap();
+        let explicit: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.], "scale":1.0, "keep_norm":false
+        }))
+        .unwrap();
+        let mut a = [3.0_f32, 4.0];
+        let mut b = a;
+        old.apply(&mut a);
+        explicit.apply(&mut b);
+        assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits));
+    }
 }
 
 impl Operation {
     fn validate(&self, hidden: usize) -> Result<()> {
         match self {
-            Self::Add { vector } | Self::Replace { vector } => ensure!(
+            Self::Add { vector }
+            | Self::Replace { vector }
+            | Self::ProjectOut { vector, .. }
+            | Self::Subtract { vector, .. } => ensure!(
                 vector.len() == hidden && vector.iter().all(|v| v.is_finite()),
                 "intervention vector must contain {hidden} finite values"
             ),
             Self::Scale { factor } => ensure!(factor.is_finite(), "scale must be finite"),
-            Self::Zero => {}
+            Self::Zero | Self::ZeroExpert { .. } => {}
+        }
+        match self {
+            Self::ProjectOut { vector, scale, .. } => ensure!(
+                vector.iter().any(|&v| v != 0.0) && (0.0..=4.0).contains(scale),
+                "projection needs a nonzero direction and a scale in 0..=4"
+            ),
+            Self::Subtract { scale, .. } => {
+                ensure!(
+                    scale.is_finite() && *scale >= 0.0,
+                    "subtraction scale must be finite and nonnegative"
+                )
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -110,8 +209,48 @@ impl Operation {
         match self {
             Self::Add { vector } => row.iter_mut().zip(vector).for_each(|(a, b)| *a += b),
             Self::Replace { vector } => row.copy_from_slice(vector),
+            Self::ProjectOut {
+                vector,
+                scale,
+                keep_norm,
+            } => {
+                // F64 keeps the norm squared representable for finite F32 directions.
+                let (dot, norm_squared) =
+                    row.iter()
+                        .zip(vector)
+                        .fold((0.0, 0.0), |(dot, norm_squared), (&x, &d)| {
+                            let d = f64::from(d);
+                            (dot + f64::from(x) * d, norm_squared + d * d)
+                        });
+                let coefficient = *scale * (dot / norm_squared);
+                if *keep_norm {
+                    let edited = |x: f32, d: f32| f64::from(x) - coefficient * f64::from(d);
+                    let before: f64 = row.iter().map(|&x| f64::from(x).powi(2)).sum();
+                    let after: f64 = row
+                        .iter()
+                        .zip(vector)
+                        .map(|(&x, &d)| edited(x, d).powi(2))
+                        .sum();
+                    // A zero row has no direction to restore. Keep the input row.
+                    if after > 0.0 {
+                        let ratio = (before / after).sqrt();
+                        for (x, &d) in row.iter_mut().zip(vector) {
+                            *x = (edited(*x, d) * ratio) as f32;
+                        }
+                    }
+                } else {
+                    for (x, &d) in row.iter_mut().zip(vector) {
+                        *x = (f64::from(*x) - coefficient * f64::from(d)) as f32;
+                    }
+                }
+            }
+            Self::Subtract { vector, scale } => {
+                for (x, &d) in row.iter_mut().zip(vector) {
+                    *x -= *scale * d;
+                }
+            }
             Self::Scale { factor } => row.iter_mut().for_each(|a| *a *= factor),
-            Self::Zero => row.fill(0.0),
+            Self::Zero | Self::ZeroExpert { .. } => row.fill(0.0),
         }
     }
 }
@@ -135,7 +274,9 @@ struct Eval<'a> {
     count: usize,
     rows: BTreeMap<Key, Row>,
     pending: BTreeMap<Key, &'a Operation>,
-    edited: BTreeSet<Key>,
+    edited: BTreeMap<Key, Option<usize>>,
+    expert_ids: BTreeMap<Key, Vec<i32>>,
+    lens: bool,
     bytes: usize,
     error: Option<anyhow::Error>,
 }
@@ -153,8 +294,7 @@ impl Eval<'_> {
     fn selected(&self, key: Key) -> bool {
         self.spec.layers.contains(&key.layer)
             && self.spec.positions.contains(&key.position)
-            && (self.spec.roles.contains(&key.role)
-                || (self.spec.top_k != 0 && key.role == Role::LOut))
+            && (self.spec.roles.contains(&key.role) || (self.lens && key.role == Role::LOut))
     }
 
     fn targets(&self, role: Role, layer: usize) -> impl Iterator<Item = Key> + use<> {
@@ -166,6 +306,9 @@ impl Eval<'_> {
     }
 
     fn read_node(&mut self, node: *mut ffi::ggml_tensor, role: Role, layer: usize) -> Result<()> {
+        if role.routing() {
+            return self.read_route(node, role, layer);
+        }
         let tensor = unsafe { &*node };
         let attention = role == Role::KqSoftMax;
         let [width, rows, heads, seq] = tensor.ne.map(|n| n as usize);
@@ -192,7 +335,11 @@ impl Eval<'_> {
             .context("tensor byte size overflows")?;
         for key in self.targets(role, layer) {
             let capture = self.selected(key);
-            let op = self.pending.remove(&key);
+            let op = if self.expert_edit_at(key) && role == Role::FfnOut {
+                None
+            } else {
+                self.pending.remove(&key)
+            };
             if !(capture || op.is_some()) {
                 continue;
             }
@@ -226,7 +373,7 @@ impl Eval<'_> {
                     "non-finite intervention at {key:?}"
                 );
                 unsafe { ffi::ggml_backend_tensor_set(node, values.as_ptr().cast(), offset, len) };
-                self.edited.insert(key);
+                self.edited.insert(key, None);
             }
             if capture {
                 self.rows.insert(
@@ -240,6 +387,145 @@ impl Eval<'_> {
         }
         Ok(())
     }
+
+    fn expert_edit_at(&self, key: Key) -> bool {
+        matches!(
+            self.pending.get(&Key {
+                role: Role::FfnOut,
+                ..key
+            }),
+            Some(Operation::ZeroExpert { .. })
+        )
+    }
+
+    fn read_route(&mut self, node: *mut ffi::ggml_tensor, role: Role, layer: usize) -> Result<()> {
+        let tensor = unsafe { &*node };
+        let [n0, n1, n2, n3] = tensor.ne.map(|n| n as usize);
+        let ids = role == Role::FfnMoeTopk;
+        let weights = role == Role::FfnMoeRouteWeights;
+        let (width, count, stride) = if weights {
+            ensure!(
+                n0 == 1 && tensor.nb[1] == 4,
+                "unsupported route weight layout"
+            );
+            (n1, n2, tensor.nb[2])
+        } else {
+            ensure!(n2 == 1, "unsupported router row layout");
+            (n0, n1, tensor.nb[1])
+        };
+        ensure!(
+            tensor.type_
+                == if ids {
+                    ffi::ggml_type::GGML_TYPE_I32
+                } else {
+                    ffi::ggml_type::GGML_TYPE_F32
+                }
+                && tensor.nb[0] == 4
+                && width != 0
+                && count == self.count
+                && n3 == 1,
+            "unsupported shape/type at {}-{layer}: {:?} {:?}",
+            role.name(),
+            tensor.ne,
+            tensor.type_
+        );
+        for key in self.targets(role, layer) {
+            let capture = self.selected(key);
+            let edit = ids && self.expert_edit_at(key);
+            if !capture && !edit {
+                continue;
+            }
+            let len = width.checked_mul(4).context("router row size overflows")?;
+            if capture {
+                self.charge(len)?;
+            }
+            let mut bits = vec![0i32; width];
+            unsafe {
+                ffi::ggml_backend_tensor_get(
+                    node,
+                    bits.as_mut_ptr().cast(),
+                    (key.position - self.first) * stride,
+                    len,
+                );
+            }
+            if capture {
+                // The v1 payload type is f32_le. Small GGUF expert IDs are exact in f32.
+                ensure!(
+                    !ids || bits.iter().all(|&id| (0..=16_777_216).contains(&id)),
+                    "expert ID is outside the exact f32 range"
+                );
+                let values = bits
+                    .iter()
+                    .map(|&v| {
+                        if ids {
+                            v as f32
+                        } else {
+                            f32::from_bits(v as u32)
+                        }
+                    })
+                    .collect();
+                ensure!(
+                    self.rows
+                        .insert(
+                            key,
+                            Row {
+                                shape: vec![width],
+                                values
+                            }
+                        )
+                        .is_none(),
+                    "duplicate graph node at {key:?}"
+                );
+            }
+            if edit {
+                self.expert_ids.insert(key, bits);
+            }
+        }
+        Ok(())
+    }
+
+    fn zero_experts(&mut self, node: *mut ffi::ggml_tensor, layer: usize) -> Result<()> {
+        let tensor = unsafe { &*node };
+        let [hidden, slots, count, seq] = tensor.ne.map(|n| n as usize);
+        ensure!(
+            tensor.type_ == ffi::ggml_type::GGML_TYPE_F32
+                && tensor.view_src.is_null()
+                && hidden == self.hidden
+                && count == self.count
+                && seq == 1
+                && tensor.nb[0] == 4,
+            "unsupported weighted expert contribution layout"
+        );
+        let zeros = vec![0.0f32; hidden];
+        for key in self.targets(Role::FfnOut, layer) {
+            if !self.expert_edit_at(key) {
+                continue;
+            }
+            let Some(Operation::ZeroExpert { expert }) = self.pending.remove(&key) else {
+                unreachable!();
+            };
+            let ids = self
+                .expert_ids
+                .remove(&Key {
+                    role: Role::FfnMoeTopk,
+                    ..key
+                })
+                .context("missing expert IDs for ablation")?;
+            ensure!(
+                ids.len() == slots,
+                "expert ID and weight slot counts differ"
+            );
+            if let Some(slot) = ids.iter().position(|&id| id as usize == *expert) {
+                let offset = (key.position - self.first) * tensor.nb[2] + slot * tensor.nb[1];
+                unsafe {
+                    ffi::ggml_backend_tensor_set(node, zeros.as_ptr().cast(), offset, hidden * 4);
+                }
+            }
+            // A valid but unselected expert is a no-op.
+            self.edited.insert(key, Some(*expert));
+        }
+        Ok(())
+    }
 }
 
 unsafe extern "C" fn eval_callback(
@@ -249,22 +535,30 @@ unsafe extern "C" fn eval_callback(
 ) -> bool {
     let eval = unsafe { &mut *data.cast::<Eval<'_>>() };
     let name = unsafe { CStr::from_ptr((*node).name.as_ptr()) }.to_string_lossy();
-    let matched = capture::split_name(&name).and_then(|(base, layer)| {
-        Role::ALL
-            .into_iter()
-            .find(|r| r.name() == base)
-            .map(|r| (r, layer))
-    });
-    let Some((role, layer)) = matched else {
+    let Some((base, layer)) = capture::split_name(&name) else {
         return !ask;
     };
     if eval.error.is_some() {
         return !ask;
     }
+    if base == "ffn_moe_weighted" {
+        if ask {
+            return eval
+                .targets(Role::FfnOut, layer)
+                .any(|key| eval.expert_edit_at(key));
+        }
+        eval.error = eval.zero_experts(node, layer).err();
+        return true;
+    }
+    let Some(role) = Role::ALL.into_iter().find(|r| r.name() == base) else {
+        return !ask;
+    };
     if ask {
-        return eval
-            .targets(role, layer)
-            .any(|key| eval.selected(key) || eval.pending.contains_key(&key));
+        return eval.targets(role, layer).any(|key| {
+            eval.selected(key)
+                || (role == Role::FfnMoeTopk && eval.expert_edit_at(key))
+                || (eval.pending.contains_key(&key) && !eval.expert_edit_at(key))
+        });
     }
     eval.error = eval.read_node(node, role, layer).err();
     true
@@ -312,7 +606,7 @@ struct Forward {
     rows: BTreeMap<Key, Row>,
     logits: Vec<Logits>,
     lenses: Vec<Logits>,
-    edited: BTreeSet<Key>,
+    edited: BTreeMap<Key, Option<usize>>,
 }
 
 fn emit_logits(
@@ -325,7 +619,16 @@ fn emit_logits(
     let row = Logits {
         position,
         layer,
-        top: top(values, eval.spec.top_k)?,
+        top: if eval.spec.all_logits {
+            ensure!(values.iter().all(|x| x.is_finite()), "non-finite logits");
+            values
+                .iter()
+                .enumerate()
+                .map(|(token_id, &logit)| Logit { token_id, logit })
+                .collect()
+        } else {
+            top(values, eval.spec.top_k)?
+        },
     };
     eval.charge(serde_json::to_vec(&row)?.len())?;
     out.push(row);
@@ -357,6 +660,12 @@ fn forward(
         !spec.layers.is_empty() || spec.roles.is_empty(),
         "roles require layers"
     );
+    let moe = matches!(model.s.arch.as_str(), "qwen2moe" | "qwen3moe");
+    ensure!(
+        moe || !spec.roles.iter().any(|role| role.routing()),
+        "routing capture supports only Qwen2MoE and Qwen3MoE"
+    );
+    let use_lens = spec.top_k > 0 && !spec.layers.is_empty() && !moe;
     let raw = capture::load_model(&model.s.path, true)?;
     let mut eval = Eval {
         spec,
@@ -365,7 +674,9 @@ fn forward(
         count: 0,
         rows: BTreeMap::new(),
         pending: BTreeMap::new(),
-        edited: BTreeSet::new(),
+        edited: BTreeMap::new(),
+        expert_ids: BTreeMap::new(),
+        lens: use_lens,
         bytes: 0,
         error: None,
     };
@@ -384,6 +695,14 @@ fn forward(
     let nv = unsafe { ffi::llama_vocab_n_tokens(vocab) } as usize;
     ensure!(spec.top_k <= nv, "top_k exceeds vocabulary size");
     ensure!(
+        !spec.all_logits
+            || (spec.top_k == 0
+                && spec.layers.is_empty()
+                && spec.positions.len() == 1
+                && nv <= 262144),
+        "all_logits requires one position, no layers, top_k zero, and at most 262144 vocabulary entries"
+    );
+    ensure!(
         spec.positions.iter().all(|p| *p < tokens.len()),
         "capture position outside prompt"
     );
@@ -396,7 +715,7 @@ fn forward(
         .max(spec.top_k)
         .saturating_mul(spec.positions.len());
     ensure!(entries_min <= spec.byte_cap, "export exceeds byte_cap");
-    let lens = if spec.top_k > 0 && !spec.layers.is_empty() {
+    let lens = if use_lens {
         ensure!(
             matches!(model.s.arch.as_str(), "llama" | "qwen2"),
             "logit lens supports only Llama and Qwen2; omit layers or set top_k to 0"
@@ -411,21 +730,23 @@ fn forward(
     } else {
         None
     };
-    if !rules.is_empty() {
-        ensure!(
-            matches!(model.s.arch.as_str(), "llama" | "qwen2"),
-            "interventions support only Llama and Qwen2"
-        );
-    }
     for rule in rules {
         ensure!(
             rule.layer < model.s.n_layers,
             "intervention layer outside model"
         );
-        ensure!(
-            rule.role != Role::KqSoftMax,
-            "attention patterns are read-only"
-        );
+        match rule.operation {
+            Operation::ZeroExpert { expert } => ensure!(
+                moe && rule.role == Role::FfnOut && expert < model.s.n_experts,
+                "zero_expert requires a valid Qwen2MoE or Qwen3MoE expert and ffn_out"
+            ),
+            _ => ensure!(
+                matches!(model.s.arch.as_str(), "llama" | "qwen2")
+                    && rule.role != Role::KqSoftMax
+                    && !rule.role.routing(),
+                "activation interventions require a writable Llama or Qwen2 role"
+            ),
+        };
         ensure!(
             !rule.positions.is_empty(),
             "intervention positions must not be empty"
@@ -478,7 +799,7 @@ fn forward(
             return Err(error);
         }
         ensure!(status == 0, "llama_decode failed: {status}");
-        if spec.top_k > 0 {
+        if spec.top_k > 0 || spec.all_logits {
             for &position in spec.positions.range(first..first + input.len()) {
                 let vals = unsafe { ffi::llama_get_logits_ith(ll.ctx, (position - first) as i32) };
                 ensure!(!vals.is_null(), "missing logits at position {position}");
@@ -603,9 +924,17 @@ struct Manifest<'a> {
     tokens: Vec<Token>,
     tensors: Vec<Tensor<'a>>,
     missing: Vec<Key>,
-    interventions: BTreeSet<Key>,
+    interventions: Vec<Applied>,
     model_logits: Vec<Logits>,
     logit_lens: Vec<Logits>,
+}
+
+#[derive(Serialize)]
+struct Applied {
+    #[serde(flatten)]
+    key: Key,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expert: Option<usize>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -662,7 +991,11 @@ pub(crate) fn run(args: Args) -> Result<()> {
             .collect(),
         tensors,
         missing,
-        interventions: captured.edited,
+        interventions: captured
+            .edited
+            .into_iter()
+            .map(|(key, expert)| Applied { key, expert })
+            .collect(),
         model_logits: captured.logits,
         logit_lens: captured.lenses,
     })?;
