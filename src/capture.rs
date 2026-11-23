@@ -383,6 +383,14 @@ fn piece(vocab: *const ffi::llama_vocab, t: i32) -> String {
 }
 
 pub(crate) fn tokenize(vocab: *const ffi::llama_vocab, text: &str) -> Result<Vec<i32>> {
+    tokenize_special(vocab, text, true)
+}
+
+pub(crate) fn tokenize_special(
+    vocab: *const ffi::llama_vocab,
+    text: &str,
+    parse_special: bool,
+) -> Result<Vec<i32>> {
     let mut toks = vec![0i32; text.len() + 16];
     let n = unsafe {
         ffi::llama_tokenize(
@@ -392,7 +400,7 @@ pub(crate) fn tokenize(vocab: *const ffi::llama_vocab, text: &str) -> Result<Vec
             toks.as_mut_ptr(),
             toks.len() as i32,
             true,
-            true,
+            parse_special,
         )
     };
     if n < 0 {

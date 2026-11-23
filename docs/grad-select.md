@@ -80,3 +80,40 @@ BF16 expansion needs temporary disk space for an F32 GGUF under the new
 output directory. This file is unlinked after the private model load.
 Budget host and device memory for the selected gradient, the graph and the
 weights. The command does not split a request or use CPU as a GPU fallback.
+
+## Token-weighted corpus loss
+
+`grad-corpus` computes the gradient of mean next-token NLL for one or more
+named weights. Use a UTF-8 text file with one independent sequence per line.
+The digest covers the exact file bytes, including line endings. The CLI
+tokenizes each line without a chat template. It adds the model's normal
+special tokens but does not parse control strings in the text. Each adjacent
+token pair contributes one prediction. There is no prediction across lines.
+
+```sh
+digest=$(sha256sum heldout.txt | cut -d' ' -f1)
+printf '{"weights":["blk.0.attn_q.weight","blk.0.ffn_down.weight"],"corpus_sha256":"%s"}\n' \
+  "$digest" > corpus-spec.json
+lanternfish --verbose grad-corpus --model model.gguf --spec corpus-spec.json \
+  --corpus heldout.txt --backend cpu --threads 6 --out corpus-grad
+```
+
+The command loads the backward model once. Each line with `n` predictions
+uses one causal forward/backward graph for all selected weights. The command
+multiplies each line's mean loss and gradient by `n`, sums in host F64, then
+divides by the total prediction count. This is a first derivative of mean
+loss, not the mean squared gradient. The graph uses F32 tensors. The CPU
+accumulates the output-head backward projection in F64 for vocabularies
+with at least 8192 entries to avoid loss of small terms. GPU placement
+applies to graph compute, not tokenization, host accumulation or file I/O.
+Budget 8 host bytes per selected parameter for sums, plus the model and the
+backward graph. Lines must be nonempty, with at most 256 input positions
+and within the model context. At least one line must have two or more IDs.
+
+Read `gradient.json` only after the process succeeds. Check `objective`
+(`mean_next_token_nll`), `corpus_sha256`, and the ordered array of per-line
+`tokens`. `observation_count` is the sum of `len(tokens[i]) - 1`. `loss`
+is the mean across these observations. The manifest contains the same
+`dtype`, `backend`, and `placement` fields as `grad-select`. Each entry of
+`gradients` has `name`, `shape`, `file`, and `sha256`. Check the exact set
+of names and verify each F32 payload before use.
