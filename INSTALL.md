@@ -101,19 +101,20 @@ libclang. Use [rustup](https://rustup.rs) for a current Rust.
 
 ### B2. llama.cpp
 
-Check for a system install:
+Check out the llama.cpp base and apply the
+[required patches](patches/README.md) before building. Run these commands from
+the Lanternfish source directory:
 
 ```sh
-ls /usr/include/llama.h /usr/include/gguf.h && ldconfig -p | grep -q libllama && echo found
-```
-
-If it is not found, build it:
-
-```sh
-git clone https://github.com/ggml-org/llama.cpp ~/llama.cpp
-cd ~/llama.cpp
-cmake -B build -DBUILD_SHARED_LIBS=ON -DLLAMA_CURL=OFF
-cmake --build build -j
+git clone https://github.com/ggml-org/llama.cpp ../llama.cpp
+git -C ../llama.cpp checkout --detach 184f6536024668e8908ab8c86033d56708e62b40
+sh patches/apply-llama.sh ../llama.cpp
+cmake -S ../llama.cpp -B ../llama.cpp/build \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF \
+  -DGGML_CUDA=OFF -DLLAMA_BUILD_COMMON=OFF -DLLAMA_BUILD_TESTS=OFF \
+  -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
+  -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_MTMD=OFF
+cmake --build ../llama.cpp/build --target llama -j 4
 ```
 
 Check: the llama.cpp version supports the model architecture. Older
@@ -121,35 +122,52 @@ versions fail with "unknown model architecture" in `lanternfish probe`.
 
 ### B3. Build
 
+Set the library paths from the Lanternfish source directory:
+
 ```sh
-git clone https://github.com/Quat3rnion/lanternfish
-cd lanternfish
+export LLAMA_INCLUDE_DIR="$PWD/../llama.cpp/include:$PWD/../llama.cpp/ggml/include"
+export LLAMA_LIB_DIR="$PWD/../llama.cpp/build/bin"
+```
+
+For the standalone app, build the UI before the binary:
+
+```sh
 npm --prefix web ci
 npm --prefix web run build
-```
-
-System llama.cpp:
-
-```sh
-cargo build --release
-```
-
-Source-built llama.cpp:
-
-```sh
-LLAMA_INCLUDE_DIR=$HOME/llama.cpp/include:$HOME/llama.cpp/ggml/include \
-LLAMA_LIB_DIR=$HOME/llama.cpp/build/bin \
-cargo build --release
+cargo build --release --locked
 ```
 
 If `/tmp` is not allowed, set `TMPDIR` and `CARGO_TARGET_DIR` to an allowed
 directory first.
 
 Check: `target/release/lanternfish --version` prints the version, and
-`cargo test --release` passes.
+`cargo test --release --locked` passes. To run the CPU CLI regressions
+with Python 3 and generated GGUF fixtures:
 
-Build the UI before the binary. The binary embeds `web/dist`. If you see
+```sh
+LANTERNFISH_BIN="$PWD/target/release/lanternfish" \
+  python3 -B -m unittest discover -s tests -v
+```
+
+The binary embeds `web/dist`. If you see
 the page "UI not built", build the UI and then rebuild the binary.
+
+### Headless CLI build
+
+Set `LLAMA_INCLUDE_DIR` and `LLAMA_LIB_DIR` as above. Skip the Node.js and
+Svelte steps. Use a separate target directory to keep both release binaries:
+
+```sh
+cargo build --release --locked --no-default-features --target-dir target/headless
+cargo test --release --locked --no-default-features --target-dir target/headless
+```
+
+Use `target/headless/release/lanternfish` for Model Brewery. This binary has no
+embedded web assets, HTTP listener, or `serve` command. `trace` and `grad` use
+only the output directory you give them. Legacy `run` still uses `--home` or
+`LANTERNFISH_HOME` and writes `viz.json`. The headless test uses Python 3 to
+generate small model fixtures and run the CLI. Set `TMPDIR` to a writable
+temporary directory if necessary.
 
 ### B4. Start the server
 

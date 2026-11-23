@@ -1,17 +1,24 @@
 //! lanternfish: trace and visualize how a llama.cpp model routes each token
 //! through its layers and experts, in prefill and in decoding.
+mod backward_backend;
 mod capture;
+mod edit;
+mod edit_solve;
 mod ffi;
 mod gguf;
+mod grad;
 mod jobs;
 mod model;
+#[cfg(feature = "ui")]
 mod server;
 mod store;
+mod trace;
 mod util;
 mod viz;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+#[cfg(feature = "ui")]
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -36,6 +43,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Export selected prompt activations and logits to a new directory.
+    Trace(trace::Args),
+    /// Export a next-token gradient for a selected FFN down weight.
+    Grad(grad::Args),
+    /// Compute ROME, MEMIT or AlphaEdit low-rank factors without writing source weights.
+    LocateEdit(edit::Args),
     /// Run one small forward pass and show which graph nodes fill each role.
     Probe {
         model: PathBuf,
@@ -70,6 +83,7 @@ enum Cmd {
     /// List saved traces.
     List,
     /// Serve the UI and the API.
+    #[cfg(feature = "ui")]
     Serve {
         #[arg(long, default_value = "0.0.0.0")]
         host: String,
@@ -92,8 +106,8 @@ fn default_threads() -> i32 {
         .max(1)
 }
 
-fn home(cli: &Cli) -> PathBuf {
-    cli.home.clone().unwrap_or_else(|| {
+fn home(path: Option<PathBuf>) -> PathBuf {
+    path.unwrap_or_else(|| {
         let base = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -108,8 +122,15 @@ fn main() -> Result<()> {
     if !cli.verbose {
         capture::silence_llama();
     }
-    let store = Store::new(home(&cli))?;
-    match cli.cmd {
+    let cmd = match cli.cmd {
+        Cmd::Trace(args) => return trace::run(args),
+        Cmd::Grad(args) => return grad::run(args),
+        Cmd::LocateEdit(args) => return edit::run(args),
+        cmd => cmd,
+    };
+    let store = Store::new(home(cli.home))?;
+    match cmd {
+        Cmd::Trace(_) | Cmd::Grad(_) | Cmd::LocateEdit(_) => unreachable!(),
         Cmd::Probe {
             model,
             all,
@@ -200,6 +221,7 @@ fn main() -> Result<()> {
                 );
             }
         }
+        #[cfg(feature = "ui")]
         Cmd::Serve {
             host,
             port,

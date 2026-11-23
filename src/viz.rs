@@ -33,10 +33,19 @@ impl Lens {
 
     /// logits = head @ (rmsnorm(h) * final_norm), for rows of h. Returns [rows, vocab].
     pub fn logits(&self, rows: &[&[f32]]) -> Vec<f32> {
+        self.logits_with_eps(rows, None)
+    }
+
+    pub(crate) fn rms_logits(&self, rows: &[&[f32]], eps: f32) -> Vec<f32> {
+        self.logits_with_eps(rows, Some(eps))
+    }
+
+    fn logits_with_eps(&self, rows: &[&[f32]], eps: Option<f32>) -> Vec<f32> {
         let (n, h, v) = (rows.len(), self.hidden, self.vocab);
         let mut x = vec![0f32; n * h];
         for (r, src) in rows.iter().enumerate() {
-            let s = (src.iter().map(|a| a * a).sum::<f32>() / h as f32).sqrt() + 1e-6;
+            let ms = src.iter().map(|a| a * a).sum::<f32>() / h as f32;
+            let s = eps.map_or_else(|| ms.sqrt() + 1e-6, |eps| (ms + eps).sqrt());
             for j in 0..h {
                 x[r * h + j] = src[j] / s * self.norm.as_ref().map_or(1.0, |w| w[j]);
             }

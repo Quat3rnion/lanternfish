@@ -5,12 +5,10 @@
 #   4. slim runtime
 #
 # Build:  docker build -t lanternfish .
-#         docker build --build-arg LLAMA_CPP_REF=<sha> -t lanternfish .
 # Run:    docker run -p 8791:8791 -v /path/to/models:/models:ro -v lanternfish-data:/data lanternfish
 
 ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp
-# Upstream commit with qwen4exp support (llama.cpp build 11429, 2026-10-05).
-ARG LLAMA_CPP_REF=d81235049384534c167caea52b85a694f6103d14
+ARG LLAMA_CPP_REF=184f6536024668e8908ab8c86033d56708e62b40
 
 FROM debian:trixie-slim AS llama
 ARG LLAMA_CPP_REPO
@@ -24,6 +22,8 @@ WORKDIR /src
 RUN git init -q llama.cpp && cd llama.cpp \
     && git remote add origin "$LLAMA_CPP_REPO" \
     && git fetch -q --depth 1 origin "$LLAMA_CPP_REF" && git checkout -q FETCH_HEAD
+COPY patches ./patches
+RUN sh patches/apply-llama.sh llama.cpp
 RUN cd llama.cpp && cmake -B build \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
         -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \

@@ -1,0 +1,21 @@
+diff --git a/ggml/src/ggml-cuda/mmf.cu b/ggml/src/ggml-cuda/mmf.cu
+index 646a589..04ec285 100644
+--- a/ggml/src/ggml-cuda/mmf.cu
++++ b/ggml/src/ggml-cuda/mmf.cu
+@@ -135,6 +135,16 @@ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const
+     if (ggml_is_quantized(type)) {
+         return false;
+     }
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++    // The F32 MMA kernel uses TF32 operands. Honor the same override as cuBLAS.
++    static const bool no_tf32 = [] {
++        const char * override = getenv("NVIDIA_TF32_OVERRIDE");
++        return override && strcmp(override, "0") == 0;
++    }();
++    if (type == GGML_TYPE_F32 && no_tf32) {
++        return false;
++    }
++#endif
+ 
+     const size_t ts = ggml_type_size(type);
+     if (src0_ne[0] % (warp_size * (4/ts)) != 0) {

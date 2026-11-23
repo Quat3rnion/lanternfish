@@ -12,6 +12,7 @@ fn main() {
 
     let mut b = bindgen::Builder::default()
         .header("src/ffi/wrapper.h")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_function("llama_.*|ggml_.*|gguf_.*")
         .allowlist_type("llama_.*|ggml_.*|gguf_.*")
         .allowlist_var("GGML_.*|LLAMA_.*")
@@ -37,12 +38,14 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib={l}");
     }
 
-    // rust-embed needs the folder to exist even before the UI is built.
-    let dist = PathBuf::from("web/dist");
-    if !dist.join("index.html").exists() {
-        std::fs::create_dir_all(&dist).unwrap();
-        std::fs::write(dist.join("index.html"),
-            "<!doctype html><p>UI not built. Run <code>npm --prefix web ci && npm --prefix web run build</code>, then rebuild lanternfish.</p>").unwrap();
+    if env::var_os("CARGO_FEATURE_UI").is_some() {
+        // rust-embed needs the folder to exist even before the UI is built.
+        let dist = PathBuf::from("web/dist");
+        if !dist.join("index.html").exists() {
+            std::fs::create_dir_all(&dist).unwrap();
+            std::fs::write(dist.join("index.html"),
+                "<!doctype html><p>UI not built. Run <code>npm --prefix web ci && npm --prefix web run build</code>, then rebuild lanternfish.</p>").unwrap();
+        }
+        println!("cargo:rerun-if-changed=web/dist");
     }
-    println!("cargo:rerun-if-changed=web/dist");
 }

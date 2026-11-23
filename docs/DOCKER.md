@@ -18,7 +18,7 @@ The final image runs as the user `lanternfish` (uid 10001).
 | Argument | Default | Meaning |
 |---|---|---|
 | `LLAMA_CPP_REPO` | `https://github.com/ggml-org/llama.cpp` | llama.cpp source |
-| `LLAMA_CPP_REF` | `d81235049384534c167caea52b85a694f6103d14` | Commit to build. This is upstream build 11429 (2026-10-05), which supports `qwen4exp`. Use a newer commit for newer architectures. |
+| `LLAMA_CPP_REF` | `184f6536024668e8908ab8c86033d56708e62b40` | Base of the [required patch series](../patches/README.md). |
 
 llama.cpp is built with `GGML_NATIVE=OFF`, `GGML_BACKEND_DL=ON` and
 `GGML_CPU_ALL_VARIANTS=ON`. The image therefore runs on any x86-64 CPU. At

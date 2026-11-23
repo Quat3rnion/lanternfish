@@ -1,0 +1,2 @@
+# Unified-diff context lines for blank source lines contain a single space.
+patches/llama.cpp/*.patch whitespace=-blank-at-eol

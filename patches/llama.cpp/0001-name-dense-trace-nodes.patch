@@ -1,0 +1,36 @@
+diff --git a/src/models/llama.cpp b/src/models/llama.cpp
+index f9c1251..02b3875 100644
+--- a/src/models/llama.cpp
++++ b/src/models/llama.cpp
+@@ -192,7 +192,6 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
+                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, model.layers[il].ffn_down_s,
+                     NULL,
+                     LLM_FFN_SILU, LLM_FFN_PAR, il);
+-            cb(cur, "ffn_out", il);
+         } else {
+             // MoE branch
+             cur = build_norm(ffn_inp,
+@@ -215,10 +214,9 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
+                     model.layers[il].ffn_up_exps_s,
+                     model.layers[il].ffn_gate_exps_s,
+                     model.layers[il].ffn_down_exps_s);
+-            cb(cur, "ffn_moe_out", il);
+         }
+-        cur = ggml_add(ctx0, cur, ffn_inp);
+         cb(cur, "ffn_out", il);
++        cur = ggml_add(ctx0, cur, ffn_inp);
+ 
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);
+diff --git a/src/models/qwen2.cpp b/src/models/qwen2.cpp
+index d2cd8e2..cfe3800 100644
+--- a/src/models/qwen2.cpp
++++ b/src/models/qwen2.cpp
+@@ -102,6 +102,7 @@ llama_model_qwen2::graph::graph(const llama_model & model, const llm_graph_param
+             cur = build_attn(inp_attn,
+                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
+                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
++            cb(cur, "attn_out", il);
+         }
+         if (il == n_layer - 1 && inp_out_ids) {
+             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
