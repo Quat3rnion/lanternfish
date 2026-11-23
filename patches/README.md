@@ -36,6 +36,8 @@ sh patches/apply-llama.sh /path/to/llama.cpp
    Lanternfish puts the input embeddings on the selected CUDA or ROCm device.
 8. `0008-adapt-rdna3-bf16-wmma-operands.patch`: Preserve the BF16 operand
    bits for RDNA3 WMMA with both the `short` and `__bf16` compiler signatures.
+9. `0009-name-moe-route-weights.patch`: Name the final Qwen2MoE and Qwen3MoE
+   routing weights after normalization and scaling.
 
 The HIP runtime uses this same series. The gfx1036 pointer-batched GEMM
 workaround selects system-scope fences in the ROCm CLI process before
