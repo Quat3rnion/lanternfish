@@ -3,7 +3,7 @@ import math
 import struct
 
 
-def write_model(path, precision, arch="llama", perturb=None):
+def write_model(path, precision, arch="llama", perturb=None, tied=False):
     def pack(fmt, *values):
         return struct.pack("<" + fmt, *values)
 
@@ -62,7 +62,8 @@ def write_model(path, precision, arch="llama", perturb=None):
         payload.extend(bytes(-len(payload) % 32))
 
     tensor("token_embd.weight", 32, len(vocab))
-    tensor("output.weight", 32, len(vocab))
+    if not tied:
+        tensor("output.weight", 32, len(vocab))
     tensor("output_norm.weight", 32)
     for layer in range(2):
         prefix = f"blk.{layer}."
