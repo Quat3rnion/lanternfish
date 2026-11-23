@@ -37,6 +37,9 @@ lanternfish trace --model model.gguf --prompt "The capital of France is" \
   even if `roles` does not include `l_out`. Set `top_k` to `0` to skip logits.
   Set `layers` and `roles` to `[]` for model logits only. `top_k` cannot
   exceed the vocabulary size.
+- `all_logits: true` returns every model logit in token ID order. Use an
+  empty `layers` list, one position, and `top_k: 0`. The vocabulary limit
+  is 262144 entries. The byte cap still applies.
 - `byte_cap` is the maximum for the manifest and all binary payloads together.
   The command fails instead of discarding requested data to fit the cap. The
   cap is not a limit on model memory, ggml work buffers, or projection memory.
@@ -67,7 +70,10 @@ lanternfish trace --model model.gguf --prompt "The capital of France is" \
 Use `add`, `replace`, `project_out`, or `subtract` with a `vector` array of
 finite numbers, one per hidden dimension. `project_out` removes the component
 of the row along the nonzero vector. The vector does not have to be a unit
-vector. `subtract` subtracts the vector multiplied by the finite, nonnegative
+vector. Its optional `scale` (0 to 4, default 1) multiplies the subtracted
+component. Set `keep_norm: true` to rescale the edited row to its original
+L2 norm. A projection that gives an exactly zero row leaves the original
+row unchanged when `keep_norm` is true. `subtract` subtracts the vector multiplied by the finite, nonnegative
 `scale`. The `scale` operation multiplies the row by a finite `factor`. `zero` sets all
 values in the row to zero. `kq_soft_max` is read-only. Rules can target rows
 outside the capture spec. Two rules cannot edit the same layer, role, and
@@ -106,7 +112,7 @@ is `"trace"`. Other fields:
 
 Each `top` is a list of `{token_id, logit}` records. Values are raw logits,
 not probabilities. The list is sorted by decreasing logit, then by increasing
-token ID for ties.
+token ID for ties. With `all_logits: true`, the list is in token ID order.
 
 Each payload descriptor has `file`, `shape`, `dtype`, `bytes`, and `sha256`.
 `file` is a relative file name such as `tensor-000000.f32`; `dtype` is

@@ -89,6 +89,12 @@ pub(crate) struct Spec {
     pub(crate) positions: BTreeSet<usize>,
     pub(crate) top_k: usize,
     pub(crate) byte_cap: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) all_logits: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Deserialize, Serialize)]
@@ -103,13 +109,71 @@ struct Rule {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
-    Add { vector: Vec<f32> },
-    Replace { vector: Vec<f32> },
-    ProjectOut { vector: Vec<f32> },
-    Subtract { vector: Vec<f32>, scale: f32 },
-    Scale { factor: f32 },
+    Add {
+        vector: Vec<f32>,
+    },
+    Replace {
+        vector: Vec<f32>,
+    },
+    ProjectOut {
+        vector: Vec<f32>,
+        #[serde(default = "unit_scale")]
+        scale: f64,
+        #[serde(default)]
+        keep_norm: bool,
+    },
+    Subtract {
+        vector: Vec<f32>,
+        scale: f32,
+    },
+    Scale {
+        factor: f32,
+    },
     Zero,
     ZeroExpert { expert: usize },
+}
+
+fn unit_scale() -> f64 {
+    1.0
+}
+
+#[cfg(test)]
+mod scaled_projection_tests {
+    use super::*;
+
+    #[test]
+    fn scaled_projection_crosses_zero_and_can_preserve_norm() {
+        let mut row = [3.0_f32, 4.0];
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.], "scale":1.5
+        }))
+        .unwrap();
+        op.validate(2).unwrap();
+        op.apply(&mut row);
+        assert_eq!(row, [-1.5, 4.0]);
+        row = [3.0, 4.0];
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.], "keep_norm":true
+        }))
+        .unwrap();
+        op.validate(2).unwrap();
+        op.apply(&mut row);
+        assert_eq!(row, [0.0, 5.0]);
+
+        let old: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.]
+        }))
+        .unwrap();
+        let explicit: Operation = serde_json::from_value(serde_json::json!({
+            "op":"project_out", "vector":[2.,0.], "scale":1.0, "keep_norm":false
+        }))
+        .unwrap();
+        let mut a = [3.0_f32, 4.0];
+        let mut b = a;
+        old.apply(&mut a);
+        explicit.apply(&mut b);
+        assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits));
+    }
 }
 
 impl Operation {
@@ -117,7 +181,7 @@ impl Operation {
         match self {
             Self::Add { vector }
             | Self::Replace { vector }
-            | Self::ProjectOut { vector }
+            | Self::ProjectOut { vector, .. }
             | Self::Subtract { vector, .. } => ensure!(
                 vector.len() == hidden && vector.iter().all(|v| v.is_finite()),
                 "intervention vector must contain {hidden} finite values"
@@ -126,9 +190,9 @@ impl Operation {
             Self::Zero | Self::ZeroExpert { .. } => {}
         }
         match self {
-            Self::ProjectOut { vector } => ensure!(
-                vector.iter().any(|&v| v != 0.0),
-                "projection direction must be nonzero"
+            Self::ProjectOut { vector, scale, .. } => ensure!(
+                vector.iter().any(|&v| v != 0.0) && (0.0..=4.0).contains(scale),
+                "projection needs a nonzero direction and a scale in 0..=4"
             ),
             Self::Subtract { scale, .. } => {
                 ensure!(
@@ -145,7 +209,11 @@ impl Operation {
         match self {
             Self::Add { vector } => row.iter_mut().zip(vector).for_each(|(a, b)| *a += b),
             Self::Replace { vector } => row.copy_from_slice(vector),
-            Self::ProjectOut { vector } => {
+            Self::ProjectOut {
+                vector,
+                scale,
+                keep_norm,
+            } => {
                 // F64 keeps the norm squared representable for finite F32 directions.
                 let (dot, norm_squared) =
                     row.iter()
@@ -154,9 +222,26 @@ impl Operation {
                             let d = f64::from(d);
                             (dot + f64::from(x) * d, norm_squared + d * d)
                         });
-                let coefficient = dot / norm_squared;
-                for (x, &d) in row.iter_mut().zip(vector) {
-                    *x = (f64::from(*x) - coefficient * f64::from(d)) as f32;
+                let coefficient = *scale * (dot / norm_squared);
+                if *keep_norm {
+                    let edited = |x: f32, d: f32| f64::from(x) - coefficient * f64::from(d);
+                    let before: f64 = row.iter().map(|&x| f64::from(x).powi(2)).sum();
+                    let after: f64 = row
+                        .iter()
+                        .zip(vector)
+                        .map(|(&x, &d)| edited(x, d).powi(2))
+                        .sum();
+                    // A zero row has no direction to restore. Keep the input row.
+                    if after > 0.0 {
+                        let ratio = (before / after).sqrt();
+                        for (x, &d) in row.iter_mut().zip(vector) {
+                            *x = (edited(*x, d) * ratio) as f32;
+                        }
+                    }
+                } else {
+                    for (x, &d) in row.iter_mut().zip(vector) {
+                        *x = (f64::from(*x) - coefficient * f64::from(d)) as f32;
+                    }
                 }
             }
             Self::Subtract { vector, scale } => {
@@ -534,7 +619,16 @@ fn emit_logits(
     let row = Logits {
         position,
         layer,
-        top: top(values, eval.spec.top_k)?,
+        top: if eval.spec.all_logits {
+            ensure!(values.iter().all(|x| x.is_finite()), "non-finite logits");
+            values
+                .iter()
+                .enumerate()
+                .map(|(token_id, &logit)| Logit { token_id, logit })
+                .collect()
+        } else {
+            top(values, eval.spec.top_k)?
+        },
     };
     eval.charge(serde_json::to_vec(&row)?.len())?;
     out.push(row);
@@ -600,6 +694,14 @@ fn forward(
     );
     let nv = unsafe { ffi::llama_vocab_n_tokens(vocab) } as usize;
     ensure!(spec.top_k <= nv, "top_k exceeds vocabulary size");
+    ensure!(
+        !spec.all_logits
+            || (spec.top_k == 0
+                && spec.layers.is_empty()
+                && spec.positions.len() == 1
+                && nv <= 262144),
+        "all_logits requires one position, no layers, top_k zero, and at most 262144 vocabulary entries"
+    );
     ensure!(
         spec.positions.iter().all(|p| *p < tokens.len()),
         "capture position outside prompt"
@@ -697,7 +799,7 @@ fn forward(
             return Err(error);
         }
         ensure!(status == 0, "llama_decode failed: {status}");
-        if spec.top_k > 0 {
+        if spec.top_k > 0 || spec.all_logits {
             for &position in spec.positions.range(first..first + input.len()) {
                 let vals = unsafe { ffi::llama_get_logits_ith(ll.ctx, (position - first) as i32) };
                 ensure!(!vals.is_null(), "missing logits at position {position}");
