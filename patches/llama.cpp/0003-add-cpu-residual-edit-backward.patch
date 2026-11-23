@@ -1,0 +1,270 @@
+diff --git a/include/llama.h b/include/llama.h
+index 46e18ec..e822e60 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -1746,6 +1746,17 @@ extern "C" {
+                            float * grad,
+                           size_t   grad_count);
+ 
++    // CPU F32 backward for a residual displacement at one sequence position.
++    // Each row of labels is a target probability distribution for logits
++    // starting at first_label through the final input token. Context is single-use.
++    LLAMA_API int32_t llama_lanternfish_residual_gradient(
++            struct llama_context * ctx, const llama_token * tokens, int32_t count,
++            int32_t first_label, const float * labels, int32_t layer, int32_t position,
++            const float * delta, float * loss, float * grad, size_t width);
++
++    // Access for the CPU editor's private, non-mmap model copy only.
++    LLAMA_API struct ggml_tensor * llama_lanternfish_ffn_down(struct llama_model * model, int32_t layer);
++
+     LLAMA_API void llama_opt_epoch(
+             struct llama_context    * lctx,
+             ggml_opt_dataset_t        dataset,
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 44d898c..ca5ac0d 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -3749,10 +3749,15 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
+ //
+ 
+ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t count, llama_token target,
+-        int32_t layer, float * loss_out, float * grad_out, size_t grad_count) {
++        int32_t layer, float * loss_out, float * grad_out, size_t grad_count,
++        int32_t first_label, const float * soft_labels, int32_t position, const float * delta) {
+     const int32_t n_vocab = model.vocab.n_tokens();
++    const bool residual = delta != nullptr;
+     if (!tokens || !loss_out || !grad_out || count <= 0 || uint32_t(count) > cparams.n_ubatch ||
+-            layer < 0 || size_t(layer) >= model.layers.size() || target < 0 || target >= n_vocab ||
++            layer < 0 || size_t(layer) >= model.layers.size() ||
++            (residual ? (!soft_labels || first_label < 0 || first_label >= count ||
++             position < 0 || position >= count || grad_count != model.hparams.n_embd) :
++             (target < 0 || target >= n_vocab)) ||
+             !memory || n_queued_tokens != 0 || backends.size() != 1 || !backend_cpu ||
+             cparams.flash_attn || !cparams.causal_attn || cparams.n_seq_max != 1 || cparams.cb_eval || opt_ctx ||
+             (model.arch != LLM_ARCH_LLAMA && model.arch != LLM_ARCH_QWEN2) ||
+@@ -3765,7 +3770,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+         }
+     }
+     auto * weight = model.layers[layer].ffn_down;
+-    if (!weight || size_t(ggml_nelements(weight)) != grad_count) {
++    if (!weight || (!residual && size_t(ggml_nelements(weight)) != grad_count)) {
+         throw std::runtime_error("wrong FFN down weight size");
+     }
+     for (int32_t i = 0; i < count; ++i) {
+@@ -3776,7 +3781,7 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+ 
+     // Build the ordinary model graph, with the existing training path that
+     // reads K/V directly rather than through the non-differentiable KV cache.
+-    std::vector<int8_t> logits(count, 0);
++    std::vector<int8_t> logits(count, residual ? 1 : 0);
+     logits.back() = 1;
+     auto batch = llama_batch_get_one(const_cast<llama_token *>(tokens), count);
+     batch.logits = logits.data();
+@@ -3791,54 +3796,80 @@ void llama_context::lanternfish_gradient(const llama_token * tokens, int32_t cou
+     }
+     const auto & ubatch = mctx->get_ubatch();
+     cparams.training = true;
+-    n_outputs = 1;
++    n_outputs = residual ? count : 1;
+     const size_t capacity = graph_max_nodes(count);
+     sched_new(capacity, false);
+     llm_graph_result res(capacity);
+-    auto * forward = model.build_graph(graph_params(&res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type)));
+-    auto * output = res.get_logits();
+-    if (!forward || !output || output->ne[0] != n_vocab || output->ne[1] != 1) {
+-        throw std::runtime_error("missing next-token logits");
+-    }
+-
+     ggml_context_ptr meta(ggml_init({
+         capacity * ggml_tensor_overhead() + ggml_graph_overhead_custom(capacity, true), nullptr, true,
+     }));
+     if (!meta) {
+         throw std::runtime_error("could not allocate gradient graph metadata");
+     }
+-    auto * labels = ggml_new_tensor_1d(meta.get(), GGML_TYPE_F32, n_vocab);
+-    ggml_set_input(labels);
+-    auto * loss = ggml_cross_entropy_loss(meta.get(), output, labels);
+-    ggml_set_loss(loss);
+-    ggml_set_output(loss);
+-    auto * graph = ggml_new_graph_custom(meta.get(), capacity, true);
+-
+     // The scheduler records graph pointers. Drop it before the graph metadata,
+     // on success or error; this context is single-use.
+     struct reset_scheduler {
+         llama_context & ctx;
+-        ~reset_scheduler() { ctx.sched.reset(); }
++        ~reset_scheduler() {
++            ctx.sched.reset();
++            ctx.cparams.lanternfish_layer = -1;
++            ctx.cparams.lanternfish_delta = nullptr;
++            ctx.cparams.lanternfish_mask = nullptr;
++        }
+     } reset { *this };
+ 
+-    const auto flags = weight->flags;
+-    ggml_set_param(weight);
++    auto * param = weight;
++    if (residual) {
++        cparams.lanternfish_layer = layer;
++        cparams.lanternfish_delta = ggml_new_tensor_1d(meta.get(), GGML_TYPE_F32, grad_count);
++        cparams.lanternfish_mask = ggml_new_tensor_2d(meta.get(), GGML_TYPE_F32, 1, count);
++        param = cparams.lanternfish_delta;
++        ggml_set_input(param);
++        ggml_set_input(cparams.lanternfish_mask);
++    }
++    auto * forward = model.build_graph(graph_params(&res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type)));
++    auto * output = res.get_logits();
++    if (!forward || !output || output->ne[0] != n_vocab || output->ne[1] != n_outputs) {
++        throw std::runtime_error("missing target logits");
++    }
++    const int32_t n_labels = residual ? count - first_label : 1;
++    if (residual) {
++        output = ggml_view_2d(meta.get(), output, n_vocab, n_labels,
++                output->nb[1], first_label * output->nb[1]);
++    }
++    auto * labels = ggml_new_tensor_2d(meta.get(), GGML_TYPE_F32, n_vocab, n_labels);
++    ggml_set_input(labels);
++    auto * loss = ggml_cross_entropy_loss(meta.get(), output, labels);
++    ggml_set_loss(loss);
++    ggml_set_output(loss);
++    auto * graph = ggml_new_graph_custom(meta.get(), capacity, true);
++
++    const auto flags = param->flags;
++    ggml_set_param(param);
+     ggml_build_forward_expand(graph, loss);
+     ggml_build_backward_expand(meta.get(), graph, nullptr);
+-    weight->flags = flags;
+-    auto * grad = ggml_graph_get_grad(graph, weight);
++    param->flags = flags;
++    auto * grad = ggml_graph_get_grad(graph, param);
+     if (!grad || grad->type != GGML_TYPE_F32 || !ggml_is_contiguous(grad) ||
+             ggml_nbytes(grad) != grad_count * sizeof(float)) {
+-        throw std::runtime_error("missing FFN down gradient");
++        throw std::runtime_error("missing parameter gradient");
+     }
+     ggml_set_output(grad);
+     if (!ggml_backend_sched_alloc_graph(sched.get(), graph)) {
+         throw std::runtime_error("could not allocate gradient graph");
+     }
+     res.set_inputs(&ubatch);
+-    std::vector<float> one_hot(n_vocab, 0.0f);
+-    one_hot[target] = 1.0f;
+-    ggml_backend_tensor_set(labels, one_hot.data(), 0, n_vocab * sizeof(float));
++    if (residual) {
++        std::vector<float> mask(count, 0.0f);
++        mask[position] = 1.0f;
++        ggml_backend_tensor_set(cparams.lanternfish_mask, mask.data(), 0, count * sizeof(float));
++        ggml_backend_tensor_set(param, delta, 0, ggml_nbytes(param));
++        ggml_backend_tensor_set(labels, soft_labels, 0, ggml_nbytes(labels));
++    } else {
++        std::vector<float> one_hot(n_vocab, 0.0f);
++        one_hot[target] = 1.0f;
++        ggml_backend_tensor_set(labels, one_hot.data(), 0, ggml_nbytes(labels));
++    }
+     ggml_graph_reset(graph);
+     if (graph_compute(graph, count > 1) != GGML_STATUS_SUCCESS) {
+         throw std::runtime_error("gradient graph evaluation failed");
+@@ -4808,6 +4839,29 @@ int32_t llama_lanternfish_gradient(
+     }
+ }
+ 
++int32_t llama_lanternfish_residual_gradient(
++        llama_context * ctx, const llama_token * tokens, int32_t count, int32_t first_label,
++        const float * labels, int32_t layer, int32_t position, const float * delta, float * loss,
++        float * grad, size_t width) {
++    try {
++        if (!ctx || !delta) {
++            return -1;
++        }
++        ctx->lanternfish_gradient(tokens, count, -1, layer, loss, grad, width, first_label, labels, position, delta);
++        return 0;
++    } catch (const std::exception & e) {
++        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
++        return -1;
++    }
++}
++
++ggml_tensor * llama_lanternfish_ffn_down(llama_model * model, int32_t layer) {
++    if (!model || layer < 0 || size_t(layer) >= model->layers.size()) {
++        return nullptr;
++    }
++    return model->layers[layer].ffn_down;
++}
++
+ void llama_opt_init(struct llama_context * ctx, struct llama_model * model, struct llama_opt_params lopt_params) {
+     ctx->opt_init(model, lopt_params);
+ }
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 2037340..2282b60 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -205,7 +205,9 @@ struct llama_context {
+     void opt_init(struct llama_model * model, struct llama_opt_params lopt_params);
+ 
+     void lanternfish_gradient(const llama_token * tokens, int32_t count, llama_token target, int32_t layer,
+-                              float * loss_out, float * grad_out, size_t grad_count);
++                              float * loss_out, float * grad_out, size_t grad_count,
++                              int32_t first_label = -1, const float * labels = nullptr,
++                              int32_t position = -1, const float * delta = nullptr);
+ 
+     // TODO: more flexible combinations of logical/physical batch size and context size
+     void opt_epoch(
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index 0c260f7..d7203d9 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -57,6 +57,10 @@ struct llama_cparams {
+     bool pipeline_parallel;
+     bool training;           // set by llama_opt_init()
+ 
++    int32_t lanternfish_layer = -1;
++    struct ggml_tensor * lanternfish_delta = nullptr;
++    struct ggml_tensor * lanternfish_mask = nullptr;
++
+     size_t moe_cache_size;
+ 
+     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index eb96b47..1e265fe 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2117,6 +2117,9 @@ ggml_tensor * llm_graph_context::build_ffn(
+     }
+ 
+     if (down) {
++        if (arch == LLM_ARCH_LLAMA || arch == LLM_ARCH_QWEN2) {
++            cb(cur, "ffn_key", il);
++        }
+         cur = build_lora_mm(down, cur);
+         if (arch == LLM_ARCH_GLM4 || arch == LLM_ARCH_GLM4_MOE || arch == LLM_ARCH_JAIS2) {
+             // GLM4, GLM4_MOE, and JAIS2 seem to have numerical issues with half-precision accumulators
+diff --git a/src/models/llama.cpp b/src/models/llama.cpp
+index 02b3875..1376be0 100644
+--- a/src/models/llama.cpp
++++ b/src/models/llama.cpp
+@@ -217,6 +217,10 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
+         }
+         cb(cur, "ffn_out", il);
+         cur = ggml_add(ctx0, cur, ffn_inp);
++        if (il == cparams.lanternfish_layer) {
++            auto * delta = ggml_repeat(ctx0, cparams.lanternfish_delta, cur);
++            cur = ggml_add(ctx0, cur, ggml_mul(ctx0, delta, cparams.lanternfish_mask));
++        }
+ 
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);
+diff --git a/src/models/qwen2.cpp b/src/models/qwen2.cpp
+index cfe3800..d47cd2a 100644
+--- a/src/models/qwen2.cpp
++++ b/src/models/qwen2.cpp
+@@ -126,6 +126,10 @@ llama_model_qwen2::graph::graph(const llama_model & model, const llm_graph_param
+         cb(cur, "ffn_out", il);
+ 
+         cur = ggml_add(ctx0, cur, ffn_inp);
++        if (il == cparams.lanternfish_layer) {
++            auto * delta = ggml_repeat(ctx0, cparams.lanternfish_delta, cur);
++            cur = ggml_add(ctx0, cur, ggml_mul(ctx0, delta, cparams.lanternfish_mask));
++        }
+ 
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);

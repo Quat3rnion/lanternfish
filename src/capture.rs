@@ -304,9 +304,20 @@ fn load(path: &Path) -> Result<*mut ffi::llama_model> {
 }
 
 pub(crate) fn load_model(path: &Path, cpu_only: bool) -> Result<*mut ffi::llama_model> {
+    load_model_with_mapping(path, cpu_only, true)
+}
+
+pub(crate) fn load_model_with_mapping(
+    path: &Path,
+    cpu_only: bool,
+    mmap: bool,
+) -> Result<*mut ffi::llama_model> {
     init_backends();
     let mut mp = unsafe { ffi::llama_model_default_params() };
     mp.n_gpu_layers = 0;
+    if !mmap {
+        mp.load_mode = ffi::llama_load_mode_LLAMA_LOAD_MODE_NONE;
+    }
     let mut devices = [std::ptr::null_mut()];
     if cpu_only {
         mp.devices = devices.as_mut_ptr();

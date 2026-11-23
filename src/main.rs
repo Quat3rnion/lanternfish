@@ -1,6 +1,8 @@
 //! lanternfish: trace and visualize how a llama.cpp model routes each token
 //! through its layers and experts, in prefill and in decoding.
 mod capture;
+mod edit;
+mod edit_solve;
 mod ffi;
 mod gguf;
 mod grad;
@@ -44,6 +46,8 @@ enum Cmd {
     Trace(trace::Args),
     /// Export a CPU next-token gradient for a selected FFN down weight.
     Grad(grad::Args),
+    /// Compute CPU ROME, MEMIT or AlphaEdit low-rank factors without writing source weights.
+    LocateEdit(edit::Args),
     /// Run one small forward pass and show which graph nodes fill each role.
     Probe {
         model: PathBuf,
@@ -120,11 +124,12 @@ fn main() -> Result<()> {
     let cmd = match cli.cmd {
         Cmd::Trace(args) => return trace::run(args),
         Cmd::Grad(args) => return grad::run(args),
+        Cmd::LocateEdit(args) => return edit::run(args),
         cmd => cmd,
     };
     let store = Store::new(home(cli.home))?;
     match cmd {
-        Cmd::Trace(_) | Cmd::Grad(_) => unreachable!(),
+        Cmd::Trace(_) | Cmd::Grad(_) | Cmd::LocateEdit(_) => unreachable!(),
         Cmd::Probe {
             model,
             all,
