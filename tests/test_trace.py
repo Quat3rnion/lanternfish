@@ -154,6 +154,21 @@ class TraceTests(unittest.TestCase):
         self.spec["byte_cap"] = 256  # the two residuals fit, the manifest does not
         self.assertIn("byte_cap", self.trace("f32", check=False))
 
+    def test_full_logits_and_scaled_projection(self):
+        self.spec.update(layers=[], roles=[], positions=[1], top_k=3, byte_cap=65536)
+        top = self.trace("bf16", "top", arch="qwen2")["model_logits"][0]["top"]
+        self.spec.update(top_k=0, all_logits=True)
+        baseline = self.trace("bf16", "full", arch="qwen2")["model_logits"][0]["top"]
+        self.assertEqual([row["token_id"] for row in baseline], list(range(len(baseline))))
+        self.assertEqual(top, sorted(baseline, key=lambda row: (-row["logit"], row["token_id"]))[:3])
+        rule = {"layer": 1, "role": "l_out", "positions": [1],
+                "op": "project_out", "vector": [1.] + [0.] * 31}
+        plain = self.trace("bf16", "default", arch="qwen2", rules=[rule])
+        unit = self.trace("bf16", "unit", arch="qwen2", rules=[dict(rule, scale=1)])
+        scaled = self.trace("bf16", "scaled", arch="qwen2", rules=[dict(rule, scale=1.5)])
+        self.assertEqual(plain["model_logits"], unit["model_logits"])
+        self.assertNotEqual(plain["model_logits"], scaled["model_logits"])
+
     def test_lens_only_does_not_export_or_charge_residual_payloads(self):
         self.spec.update(roles=[], top_k=1, byte_cap=1000)
         manifest = self.trace("f32")
